@@ -52,20 +52,28 @@ class ERA5CubeDataset(Dataset):
         return len(self.idxs)
 
     def __getitem__(self, idx):
-        t,y,x = self.idxs[idx]
-        sl = dict(valid_time=slice(t, t+self.window["T"]),
-                  var=slice(0, self.C),
-                  latitude=slice(y, y+self.window["H"]),
-                  longitude=slice(x, x+self.window["W"]))
+        t, y, x = self.idxs[idx]
+        sl = dict(
+            valid_time=slice(t, t + self.window["T"]),
+            var=slice(0, self.C),
+            latitude=slice(y, y + self.window["H"]),
+            longitude=slice(x, x + self.window["W"]),
+        )
         cube = self.data.isel(**sl).values.astype(np.float32)  # (T, C, H, W)
-        cube = np.transpose(cube, (1,0,2,3))  # (C, T, H, W)
-        # normalise per-var
+        cube = np.transpose(cube, (1, 0, 2, 3))               # (C, T, H, W)
+
+        # validity mask: True where ALL variables are finite at that (t,h,w)
+        valid = np.isfinite(cube).all(axis=0, keepdims=True)  # (1, T, H, W)
+
+        # per-var normalize, ignoring NaNs/Infs; fill NaNs with per-var mean BEFORE z-score
         for i, v in enumerate(self.variables):
-            mean, std = self.norm_stats.get(v, (None, None))
-            if mean is None or std is None:
-                m = cube[i].mean()
-                s = cube[i].std() + 1e-6
-            else:
-                m, s = mean, std
-            cube[i] = (cube[i] - m)/s
-        return torch.from_numpy(cube)
+            arr = cube[i]
+            m = np.nanmean(arr)
+            s = np.nanstd(arr) + 1e-6
+            arr = np.nan_to_num(arr, nan=m, posinf=m, neginf=m)
+            cube[i] = (arr - m) / s
+
+        # optional: clip extreme z-scores to avoid occasional outliers
+        np.clip(cube, -8.0, 8.0, out=cube)
+
+        return torch.from_numpy(cube), torch.from_numpy(valid.astype(np.bool_))
