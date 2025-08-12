@@ -72,23 +72,20 @@ class ERA5():
     # https://cds.climate.copernicus.eu/cdsapp#!/dataset/reanalysis-era5-single-levels
     ################################################################################
     def reanalysis_era5_single_levels(name, shortname, dt1, dt2, dir):
+        import concurrent.futures
         # データ抽出期間を補正
         period = ERA5.correct_dt_single(shortname, dt1, dt2, dir)
         dt1 = period[0]
         dt2 = period[1]
         print(f'{shortname}: {dt1} - {dt2}')
 
-        dt = dt1
-
         if not os.path.exists(str(dir)+'/nc_'+str(shortname)):
             os.makedirs(str(dir)+'/nc_'+str(shortname))
 
-        while dt <= dt2:
+        def download(dt):
             print(str(name))
             print(dt)
-
             ncfile = str(dir)+'/nc_'+str(shortname)+'/ERA5_'+str(format(dt.year, '04'))+'-'+str(format(dt.month, '02'))+'-'+str(format(dt.day, '02'))+'T'+str(format(dt.hour, '02'))+'_00_00_'+str(shortname)+'.nc'
-            
             if os.path.isfile(ncfile) is False:
                 ERA5.c.retrieve(
                     'reanalysis-era5-single-levels',
@@ -102,33 +99,40 @@ class ERA5():
                         'format': 'netcdf'
                     },
                     str(ncfile))
-            else:
-                pass
 
+        dts = []
+        dt = dt1
+        while dt <= dt2:
+            dts.append(dt)
             dt += ERA5.delta
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(download, d) for d in dts]
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Downloading {shortname}"):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Download failed: {e}")
 
     ################################################################################
     # 「ERA5 hourly data on pressure levels from 1940 to present」からデータを抽出する関数
     # https://cds.climate.copernicus.eu/cdsapp#!/dataset/reanalysis-era5-pressure-levels
     ################################################################################
     def reanalysis_era5_pressure_levels(name, shortname, lev, dt1, dt2, dir):
+        import concurrent.futures
         # データ抽出期間を補正
         period = ERA5.correct_dt_pressure(shortname, lev, dt1, dt2, dir)
         dt1 = period[0]
         dt2 = period[1]
         print(f'{shortname}: {dt1} - {dt2}')
-        
-        dt = dt1
 
         if not os.path.exists(str(dir)+'/nc_'+str(shortname)):
             os.makedirs(str(dir)+'/nc_'+str(shortname))
 
-        while dt <= dt2:
+        def download(dt):
             print(str(name))
             print(dt)
-
             ncfile = str(dir)+'/nc_'+str(shortname)+'/ERA5_'+str(format(dt.year, '04'))+'-'+str(format(dt.month, '02'))+'-'+str(format(dt.day, '02'))+'T'+str(format(dt.hour, '02'))+'_00_00_'+str(shortname)+'.nc'
-
             if os.path.isfile(ncfile) is False:
                 ERA5.c.retrieve(
                     'reanalysis-era5-pressure-levels',
@@ -142,10 +146,20 @@ class ERA5():
                         'format': 'netcdf'
                     },
                     str(ncfile))
-            else:
-                pass
-                
+
+        dts = []
+        dt = dt1
+        while dt <= dt2:
+            dts.append(dt)
             dt += ERA5.delta
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(download, d) for d in dts]
+            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=f"Downloading {shortname}"):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Download failed: {e}")
 
     ################################################################################
     # 変数
