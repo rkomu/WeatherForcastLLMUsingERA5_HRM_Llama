@@ -24,3 +24,8 @@ dependencies = [
     "wandb>=0.21.1",
     "xarray>=2025.7.1",
 ]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.30.1",
+]
