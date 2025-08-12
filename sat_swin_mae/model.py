@@ -97,21 +97,55 @@ class SatSwinMAE(nn.Module):
         self.decoder = Decoder3D(out_chans, embed_dims, depths, num_heads, window_size, drop_path_rate)
         self.patch_size = patch_size
 
-    def forward(self, x, compute_loss=True):
+    def forward(self, x, compute_loss=True, valid_mask=None):
         B, C, T, H, W = x.shape
         pt, ph, pw = self.patch_size
+
         mask = random_masking(B, T//pt, H//ph, W//pw, self.mask_ratio, device=x.device)
         feats = self.encoder(x, mask=mask)
-        recon = self.decoder(feats)  # (B, T',H',W', C_out)
-        # upsample back to input resolution
-        recon = F.interpolate(recon.permute(0,4,1,2,3), scale_factor=(pt, ph, pw),
-                              mode='trilinear', align_corners=False).permute(0,2,3,4,1)
+        recon = self.decoder(feats)  # (B, T', H', W', C_out)
+
+        recon = F.interpolate(
+            recon.permute(0,4,1,2,3),
+            scale_factor=(pt, ph, pw),
+            mode='trilinear',
+            align_corners=False
+        ).permute(0,2,3,4,1)  # (B, T, H, W, C_out)
+
         if not compute_loss:
             return recon.permute(0,4,1,2,3)
-        x_tgt = x.permute(0,2,3,4,1)
-        loss_map = (recon - x_tgt)**2
-        mask_full = mask.unsqueeze(-1).repeat_interleave(pt, dim=1).repeat_interleave(ph, dim=2).repeat_interleave(pw, dim=3)
-        loss = 0.9*loss_map[mask_full.expand_as(loss_map)].mean() + 0.1*loss_map[~mask_full.expand_as(loss_map)].mean()
+
+        x_tgt = x.permute(0,2,3,4,1)  # (B, T, H, W, C)
+        loss_map = (recon - x_tgt) ** 2  # (B, T, H, W, C)
+
+        # Build full-res mask from patch mask
+        mask_full = mask.unsqueeze(-1)                         # (B, T', H', W', 1)
+        mask_full = mask_full.repeat_interleave(pt, 1)\
+                               .repeat_interleave(ph, 2)\
+                               .repeat_interleave(pw, 3)       # (B, T, H, W, 1)
+        mask_M = mask_full.squeeze(-1)                         # masked locations
+        mask_U = ~mask_M                                       # unmasked locations
+
+        # Validity (exclude NaN/land wave gaps, etc.)
+        if valid_mask is not None:                             # valid_mask: (B,1,T,H,W) or (B,T,H,W)
+            if valid_mask.dim() == 5:
+                v = valid_mask.squeeze(1)                      # (B,T,H,W)
+            else:
+                v = valid_mask
+            mask_M = mask_M & v
+            mask_U = mask_U & v
+
+        # Compute safe means (avoid empty selections -> NaN)
+        loss = 0.0
+        if mask_M.any():
+            loss += 0.9 * loss_map[mask_M].mean()
+        if mask_U.any():
+            loss += 0.1 * loss_map[mask_U].mean()
+        if not mask_M.any() and not mask_U.any():
+            # fallback: everything invalid? just average over finite values
+            finite = torch.isfinite(loss_map)
+            loss = loss_map[finite].mean()
+
         return loss, recon.permute(0,4,1,2,3)
 
     @torch.no_grad()
