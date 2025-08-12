@@ -116,6 +116,26 @@ def make_loader(files, variables, window, stride, batch_size, shuffle):
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
 
 
+def unpack_and_move(batch, device):
+    """
+    Supports: Tensor, (Tensor,), (Tensor, valid_mask), dicts.
+    Returns (data_tensor, valid_mask_or_None)
+    """
+    import torch
+    if torch.is_tensor(batch):
+        return batch.to(device), None
+    if isinstance(batch, (list, tuple)):
+        data = batch[0].to(device)
+        valid = batch[1].to(device) if len(batch) > 1 and batch[1] is not None else None
+        return data, valid
+    if isinstance(batch, dict):
+        # expect keys like {"data": Tensor, "valid": Tensor?}
+        data = batch.get("data").to(device)
+        valid = batch.get("valid")
+        valid = valid.to(device) if valid is not None else None
+        return data, valid
+    raise TypeError(f"Unsupported batch type: {type(batch)}")
+
 def main():
     args = parse_args()
 
@@ -153,6 +173,8 @@ def main():
     ).to(args.device)
 
     opt = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+
+    # adjusts the learning rate following a cosine curve, decreasing it to a minimum value and then restarting
     sched = CosineAnnealingLR(opt, T_max=args.epochs)
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -161,30 +183,28 @@ def main():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
         total = 0.0
         for batch in pbar:
-            batch = batch.to(args.device)  # (B, C, T, H, W)
-            loss, _ = model(batch, compute_loss=True)
+            data, valid = unpack_and_move(batch, args.device)
+            loss, _ = model(data, compute_loss=True, valid_mask=valid)
+            pbar.set_postfix(loss=f"{loss.item():.4f}")
+
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
-            total += loss.item() * batch.size(0)
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
-        train_loss = total / len(train_loader.dataset)
 
         model.eval()
         vtotal = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                batch = batch.to(args.device)
-                loss, _ = model(batch, compute_loss=True)
-                vtotal += loss.item() * batch.size(0)
+                data, valid = unpack_and_move(batch, args.device)
+                loss, _ = model(data, compute_loss=True, valid_mask=valid)
+                vtotal += loss.item() * data.size(0)
         print(f"vtotal: {vtotal} , len(val_loader.dataset): {len(val_loader.dataset)}")
         if len(val_loader.dataset) > 0:
             val_loss = vtotal / len(val_loader.dataset)
         else:
             val_loss = float('nan')
             print("Warning: Validation dataset is empty.")
-            print(f"Epoch {epoch}: train_loss={train_loss:.4f}  val_loss={val_loss:.4f}")
             torch.save(model.state_dict(), os.path.join(args.out_dir, f"satswinmae_epoch{epoch}.pt"))
             sched.step()
 
