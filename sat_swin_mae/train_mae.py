@@ -108,11 +108,26 @@ def parse_args():
     ap.add_argument("--patch_w", type=int, default=4)
     ap.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--out_dir", type=str, default="checkpoints")
+    ap.add_argument("--time_start", type=str, default=None,
+                    help="Start of time range (e.g., '2000-01-01' or '2000-01-01 06:00'). Inclusive.")
+    ap.add_argument("--time_end",   type=str, default=None,
+                    help="End of time range (e.g., '2000-08-31'). Inclusive.")
     return ap.parse_args()
 
 
-def make_loader(files, variables, window, stride, batch_size, shuffle):
-    ds = ERA5CubeDataset(files, variables, window, stride)
+def make_loader(files, variables, window, stride, batch_size, shuffle, time_start=None, time_end=None):
+    ds = ERA5CubeDataset(
+        files, variables, window, stride,
+        time_start=time_start, time_end=time_end,
+    )
+    n = len(ds)
+    if n <= 0:
+        raise SystemExit(
+            f"[train_mae] Dataset produced 0 samples. "
+            f"Shapes T/H/W={ds.T}/{ds.H}/{ds.W}, window={window}, stride={stride}, "
+            f"time_start={time_start}, time_end={time_end}"
+        )
+    print(f"[dataset] T/H/W={ds.T}/{ds.H}/{ds.W}, C={ds.C}, windows={n}")
     return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
 
 
@@ -160,13 +175,32 @@ def main():
     window = {"T": args.window_T, "H": args.window_H, "W": args.window_W}
     stride = {"T": args.stride_T, "H": args.stride_H, "W": args.stride_W}
 
-    train_loader = make_loader(train_files, args.variables, window, stride, args.batch_size, True)
-    val_loader = make_loader(val_files, args.variables, window, stride, args.batch_size, False)
+    train_loader = make_loader(
+        train_files, args.variables, window, stride, args.batch_size, True,
+        time_start=args.time_start, time_end=args.time_end
+    )
+    val_loader = make_loader(
+        val_files, args.variables, window, stride, args.batch_size, False,
+        time_start=args.time_start, time_end=args.time_end
+    )
 
-    in_chans = len(args.variables)
+    in_chans = int(train_loader.dataset.C)
+    if hasattr(val_loader.dataset, "C"):
+        assert int(val_loader.dataset.C) == in_chans, \
+            f"Train C={in_chans} vs Val C={val_loader.dataset.C} mismatch"
+
+    # (optional) print the expanded channel names for sanity
+    chan_names = getattr(train_loader.dataset, "chan_names", None)
+    if chan_names:
+        print(f"[channels] C={in_chans}: {chan_names}")
+
+    # model
     model = SatSwinMAE(
-        in_chans=in_chans, out_chans=in_chans,
-        embed_dim=args.embed_dim, depths=tuple(args.depths), num_heads=tuple(args.heads),
+        in_chans=in_chans,
+        out_chans=in_chans,   # reconstruct all channels
+        embed_dim=args.embed_dim,
+        depths=tuple(args.depths),
+        num_heads=tuple(args.heads),
         window_size=(args.window_t, args.window_h, args.window_w),
         patch_size=(args.patch_t, args.patch_h, args.patch_w),
         mask_ratio=args.mask_ratio
@@ -199,14 +233,14 @@ def main():
                 data, valid = unpack_and_move(batch, args.device)
                 loss, _ = model(data, compute_loss=True, valid_mask=valid)
                 vtotal += loss.item() * data.size(0)
-        print(f"vtotal: {vtotal} , len(val_loader.dataset): {len(val_loader.dataset)}")
+        # print(f"vtotal: {vtotal} , len(val_loader.dataset): {len(val_loader.dataset)}")
         if len(val_loader.dataset) > 0:
             val_loss = vtotal / len(val_loader.dataset)
         else:
             val_loss = float('nan')
             print("Warning: Validation dataset is empty.")
-            torch.save(model.state_dict(), os.path.join(args.out_dir, f"satswinmae_epoch{epoch}.pt"))
-            sched.step()
+        torch.save(model.state_dict(), os.path.join(args.out_dir, f"satswinmae_epoch{epoch}.pt"))
+        sched.step()
 
 
 if __name__ == "__main__":

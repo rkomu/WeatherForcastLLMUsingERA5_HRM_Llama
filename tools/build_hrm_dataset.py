@@ -93,8 +93,7 @@ def main():
                 "grid": {"t": int(grid[0]), "h": int(grid[1]), "w": int(grid[2])},
                 "meta": {"file_index": i, "target_scalar": y_scalar}
             }
-            f.write(json.dumps(rec)+"
-")
+            f.write(json.dumps(rec)+"")
     print(f"Wrote HRM dataset shard: {shard_path}")
     print("NOTE: For true future labels, build sequences with an explicit 'future' window aligned after the input window.")
 if __name__ == "__main__":
