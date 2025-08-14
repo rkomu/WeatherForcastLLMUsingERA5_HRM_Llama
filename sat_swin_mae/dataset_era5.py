@@ -87,6 +87,7 @@ class ERA5CubeDataset(Dataset):
 
         # ---------- filter file paths ----------
         paths = [str(p) for p in files]
+        print(f"[ERA5CubeDataset] Found {len(paths)} files")
         existing = [p for p in paths if os.path.exists(p)]
         missing = [p for p in paths if not os.path.exists(p)]
         if missing:
