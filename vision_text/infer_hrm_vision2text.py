@@ -1,4 +1,3 @@
-
 import argparse, os, torch
 from sat_swin_mae.model import SatSwinMAE
 from vision_text.vision_adapter import VisionPrefixer
@@ -10,6 +9,61 @@ import torch.multiprocessing as mp
 mp.set_start_method("spawn", force=True)
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+from glob import glob
+from datetime import datetime
+from sat_swin_mae.dataset_era5 import ERA5CubeDataset
+
+def expand_input_files(paths):
+    out = []
+    for p in paths:
+        if any(ch in p for ch in ["*", "?", "["]):  # glob pattern
+            out.extend(glob(p, recursive=True))
+        elif os.path.isdir(p):                       # a directory
+            out.extend(glob(os.path.join(p, "**", "*.nc"), recursive=True))
+        else:                                        # a concrete file path
+            out.append(p)
+    # keep only existing files, de-dup, sort for stability
+    out = sorted({f for f in out if os.path.exists(f)})
+    return out
+
+def _find_time_coord(xr_ds):
+    # Try common names in ERA5/CFGRIB conversions
+    for cand in ["time", "valid_time", "forecast_time", "analysis_time", "initial_time"]:
+        if cand in getattr(xr_ds, "sizes", {}):
+            return cand
+    # fallback to first datetime-like coord
+    for k in xr_ds.coords:
+        try:
+            if "datetime64" in str(xr_ds[k].dtype):
+                return k
+        except Exception:
+            pass
+    raise KeyError("Could not find a time coordinate in ERA5 dataset.")
+
+def window_indices_for_date(inner_ds, window, target_date_str, anchor="last"):
+    """
+    Returns a list of indices (into inner_ds.idxs) whose anchor timestep date equals target_date_str (YYYY-MM-DD).
+    """
+    import pandas as pd
+    time_name = _find_time_coord(inner_ds.data)
+    times = pd.to_datetime(inner_ds.data[time_name].values)  # ndarray of datetimes
+    target_date = pd.to_datetime(target_date_str).date()
+    T_w = window["T"]
+    matches = []
+    for wi, (t0, y, x) in enumerate(inner_ds.idxs):
+        if anchor == "first":
+            ti = t0
+        elif anchor == "middle":
+            ti = t0 + (T_w // 2)
+        else:
+            ti = t0 + T_w - 1
+        if ti >= len(times):
+            continue
+        d = times[ti].date()
+        if d == target_date:
+            matches.append(wi)
+    return matches
 
 def get_token_embedding_and_dim(hrm):
     emb = getattr(hrm, 'tok_emb', None) or getattr(hrm, 'embed_tokens', None)
@@ -120,6 +174,19 @@ def main():
     ap.add_argument('--n_latents', type=int, default=32)
     ap.add_argument('--adapter_layers', type=int, default=2)
     ap.add_argument('--adapter_heads', type=int, default=8)
+    ap.add_argument('--files', type=str, nargs='+', required=True, help='ERA5 .nc files or globs (unquoted) or directories')
+    ap.add_argument('--variables', type=str, nargs='+', required=True, help='Variables used in MAE pretrain (must match channels count)')
+    ap.add_argument('--window_T', type=int, default=8)
+    ap.add_argument('--window_H', type=int, default=64)
+    ap.add_argument('--window_W', type=int, default=64)
+    ap.add_argument('--stride_T', type=int, default=8)
+    ap.add_argument('--stride_H', type=int, default=64)
+    ap.add_argument('--stride_W', type=int, default=64)
+    ap.add_argument('--date', type=str, required=True, help='Target date YYYY-MM-DD to fetch satellite window(s)')
+    ap.add_argument('--anchor', type=str, default='last', choices=['first','middle','last'], help='Which timestep inside the window to anchor the date')
+    ap.add_argument('--time_start', type=str, default=None)
+    ap.add_argument('--time_end', type=str, default=None)
+    ap.add_argument('--max_samples', type=int, default=4, help='Limit number of windows to decode for the date')
     ap.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     args = ap.parse_args()
 
@@ -160,7 +227,38 @@ def main():
     adapter.load_state_dict(torch.load(args.adapter_ckpt, map_location=device), strict=False)
     adapter.eval()
 
-    print("Adapter and HRM loaded. To generate: prompts = adapter(cubes); texts = generate_greedy(hrm, tok_emb, prompts, tokenizer)")
+    # -------- Build ERA5 dataset and select windows by date --------
+    file_list = expand_input_files(args.files)
+    if not file_list:
+        raise SystemExit("[infer] No .nc files found after expanding --files. Example: --files ./dataset/raw_data/**/*.nc (no quotes)")
+    window = {'T': args.window_T, 'H': args.window_H, 'W': args.window_W}
+    stride = {'T': args.stride_T, 'H': args.stride_H, 'W': args.stride_W}
+    era5 = ERA5CubeDataset(file_list, args.variables, window, stride,
+                           time_start=args.time_start, time_end=args.time_end)
+    match_idxs = window_indices_for_date(era5, window, args.date, anchor=args.anchor)
+    if not match_idxs:
+        raise SystemExit(f"[infer] No windows found anchored on date {args.date}. Try a different --date/--anchor or adjust --time_start/--time_end.")
+    if len(match_idxs) > args.max_samples:
+        match_idxs = match_idxs[:args.max_samples]
+
+    # -------- Generate text for each matched window --------
+    tok_emb, _ = get_token_embedding_and_dim(hrm)
+    for i, wi in enumerate(match_idxs, 1):
+        cube, valid = era5[wi]  # (C,T,H,W), (T,H,W) mask
+        cube = cube.unsqueeze(0).to(device)
+        valid_b = valid.unsqueeze(0).to(device)
+
+        # get visual prompts
+        try:
+            prompts = adapter(cube, valid_b)  # some versions accept both (cubes, valids)
+        except TypeError:
+            prompts = adapter(cube)           # fallback: only cubes
+
+        # generate greedy
+        text = generate_greedy(hrm, tok_emb, prompts, tokenizer, max_new_tokens=128, temperature=1.0)[0]
+        print(f"\n=== Sample {i} / {len(match_idxs)} — Date {args.date} (idx {wi}) ===")
+        print(text)
+    print("\n[infer] Done.")
 
 if __name__ == '__main__':
     main()

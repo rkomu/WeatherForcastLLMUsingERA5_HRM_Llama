@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+import mlflow
+import mlflow.pytorch
 
 from sat_swin_mae.model import SatSwinMAE
 from vision_text.vision_adapter import VisionPrefixer
@@ -106,6 +108,21 @@ def parse_args():
     ap.add_argument('--drop_if_no_caption', action='store_true', help="Drop windows with no caption for their date")
     ap.add_argument('--anchor', type=str, default='last', choices=['first','middle','last'], help="Which timestep to use to compute the date")
     ap.add_argument('--num_workers', type=int, default=0)
+    
+    # MLflow tracking arguments
+    ap.add_argument("--mlflow_tracking_uri", type=str, default=None,
+                    help="MLflow tracking server URI (e.g., 'http://localhost:5000'). If None, uses local file store.")
+    ap.add_argument("--mlflow_experiment_name", type=str, default="hrm_vision2text",
+                    help="MLflow experiment name.")
+    ap.add_argument("--mlflow_run_name", type=str, default=None,
+                    help="MLflow run name. If None, auto-generated.")
+    ap.add_argument("--mlflow_tags", nargs="+", default=None,
+                    help="MLflow tags in format 'key=value'. Example: --mlflow_tags env=dev model=hrm_vision2text")
+    ap.add_argument("--disable_mlflow", action="store_true",
+                    help="Disable MLflow logging.")
+    ap.add_argument("--log_model_every_n_epochs", type=int, default=0,
+                    help="Log model checkpoint to MLflow every N epochs. 0 means only log final model.")
+    
     return ap.parse_args()
 
 def collate_with_pad(batch, pad_id: int):
@@ -123,6 +140,73 @@ def collate_with_pad(batch, pad_id: int):
 
 def main():
     args = parse_args()
+
+    # Initialize MLflow
+    if not args.disable_mlflow:
+        if args.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+        
+        mlflow.set_experiment(args.mlflow_experiment_name)
+        
+        # Start MLflow run
+        with mlflow.start_run(run_name=args.mlflow_run_name):
+            # Set tags
+            mlflow.set_tag("model_type", "HRM_Vision2Text")
+            mlflow.set_tag("framework", "PyTorch")
+            mlflow.set_tag("task", "vision-to-text")
+            mlflow.set_tag("architecture", "MAE+HRM+VisionAdapter")
+            
+            # Add custom tags if provided
+            if args.mlflow_tags:
+                for tag in args.mlflow_tags:
+                    if "=" in tag:
+                        key, value = tag.split("=", 1)
+                        mlflow.set_tag(key.strip(), value.strip())
+                    else:
+                        print(f"Warning: Invalid tag format '{tag}', expected 'key=value'")
+            
+            # Log hyperparameters
+            mlflow.log_params({
+                "variables": args.variables,
+                "window_T": args.window_T,
+                "window_H": args.window_H,
+                "window_W": args.window_W,
+                "stride_T": args.stride_T,
+                "stride_H": args.stride_H,
+                "stride_W": args.stride_W,
+                "batch_size": args.batch_size,
+                "epochs": args.epochs,
+                "lr": args.lr,
+                "mae_ckpt": args.mae_ckpt,
+                "embed_dim": args.embed_dim,
+                "depths": args.depths,
+                "heads": args.heads,
+                "window_t": args.window_t,
+                "window_h": args.window_h,
+                "window_w": args.window_w,
+                "patch_t": args.patch_t,
+                "patch_h": args.patch_h,
+                "patch_w": args.patch_w,
+                "n_latents": args.n_latents,
+                "adapter_layers": args.adapter_layers,
+                "adapter_heads": args.adapter_heads,
+                "device": args.device,
+                "time_start": args.time_start,
+                "time_end": args.time_end,
+                "caption_csv": args.caption_csv,
+                "drop_if_no_caption": args.drop_if_no_caption,
+                "anchor": args.anchor,
+                "num_workers": args.num_workers,
+                "log_model_every_n_epochs": args.log_model_every_n_epochs,
+            })
+            
+            run_training(args)
+    else:
+        run_training(args)
+
+
+def run_training(args):
+    """Main training logic separated for MLflow integration."""
     device = args.device
 
     # HRM + tokenizer
@@ -174,6 +258,17 @@ def main():
             "Make sure ERA5CubeDataset returns the same C (pressure_handling/levels) when training the adapter."
         )
 
+    # Log additional dataset information to MLflow
+    if not args.disable_mlflow:
+        mlflow.log_params({
+            "dataset_C": dataset_C,
+            "dataset_samples": len(ds),
+            "files_count": len(args.files),
+            "in_chans_ckpt": in_chans_ckpt,
+            "embed_dim_ckpt": embed_dim_ckpt,
+            "patch_size": [p_t, p_h, p_w],
+        })
+
     # ---- Build MAE with CKPT-MATCHING SHAPES ----
     mae = SatSwinMAE(
         in_chans=in_chans_ckpt,
@@ -207,11 +302,27 @@ def main():
     for p in hrm.parameters(): p.requires_grad = False
     opt = torch.optim.AdamW(adapter.parameters(), lr=args.lr)
 
+    # Log model info to MLflow
+    if not args.disable_mlflow:
+        total_params = sum(p.numel() for p in adapter.parameters())
+        trainable_params = sum(p.numel() for p in adapter.parameters() if p.requires_grad)
+        hrm_params = sum(p.numel() for p in hrm.parameters())
+        mae_params = sum(p.numel() for p in mae.parameters())
+        mlflow.log_params({
+            "d_vis": d_vis,
+            "d_model": d_model,
+            "total_adapter_parameters": total_params,
+            "trainable_adapter_parameters": trainable_params,
+            "hrm_parameters": hrm_params,
+            "mae_parameters": mae_params,
+        })
+
     os.makedirs(args.out_dir, exist_ok=True)
 
     for epoch in range(1, args.epochs+1):
         adapter.train()
-        total = 0.0
+        total_loss = 0.0
+        batch_count = 0
         pbar = tqdm(dl, desc=f"Epoch {epoch}/{args.epochs}")
         for cubes, valids, input_ids, text_attn in pbar:
             cubes = cubes.to(device)
@@ -252,11 +363,47 @@ def main():
             nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
             opt.step()
 
-            total += loss.item() * B
+            total_loss += loss.item() * B
+            batch_count += B
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
-        torch.save(adapter.state_dict(), os.path.join(args.out_dir, f"adapter_epoch{epoch}.pt"))
+        # Calculate average training loss
+        avg_train_loss = total_loss / batch_count if batch_count > 0 else float('nan')
+        
+        # Log metrics to MLflow
+        if not args.disable_mlflow:
+            mlflow.log_metrics({
+                "train_loss": avg_train_loss,
+            }, step=epoch)
+            
+        print(f"Epoch {epoch}/{args.epochs} - Train Loss: {avg_train_loss:.4f}")
+
+        # Save checkpoint
+        checkpoint_path = os.path.join(args.out_dir, f"adapter_epoch{epoch}.pt")
+        torch.save(adapter.state_dict(), checkpoint_path)
         print(f"Saved adapter_epoch{epoch}.pt")
+        
+        # Log model artifact to MLflow
+        if not args.disable_mlflow:
+            # Log checkpoint artifact for every specified epoch or final epoch
+            should_log_model = (
+                epoch == args.epochs or  # Always log final model
+                (args.log_model_every_n_epochs > 0 and epoch % args.log_model_every_n_epochs == 0)
+            )
+            
+            if should_log_model:
+                try:
+                    # Log the PyTorch model
+                    mlflow.pytorch.log_model(
+                        adapter, 
+                        f"adapter_epoch_{epoch}",
+                        registered_model_name=f"{args.mlflow_experiment_name}_adapter" if epoch == args.epochs else None
+                    )
+                    # Log the checkpoint file
+                    mlflow.log_artifact(checkpoint_path, "checkpoints")
+                    print(f"Logged adapter model and checkpoint for epoch {epoch}")
+                except Exception as e:
+                    print(f"Warning: Failed to log model to MLflow: {e}")
 
 if __name__ == '__main__':
     main()
