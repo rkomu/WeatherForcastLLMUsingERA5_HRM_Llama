@@ -1,10 +1,10 @@
-# sat_swin_mae/dataset_era5.py
 import os
 import warnings
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 import pandas as pd
+import re
 
 try:
     import xarray as xr
@@ -45,6 +45,66 @@ def _probe_nc(fp, engine=None):
         return True, None
     except Exception as e:
         return False, str(e)
+
+
+# Helper to guess date from file path
+def _guess_date_from_path(fp):
+    """
+    Try to infer a date (YYYY-MM-DD) from a filepath using common patterns.
+    Returns a datetime.date or None if not found.
+    """
+    base = os.path.basename(fp)
+    # Try YYYYMMDD
+    m = re.search(r"(?<!\d)(\d{8})(?!\d)", base)
+    if m:
+        s = m.group(1)
+        try:
+            return pd.to_datetime(s, format="%Y%m%d").date()
+        except Exception:
+            pass
+    # Try YYYY-MM-DD or YYYY_MM_DD
+    m = re.search(r"(?<!\d)(\d{4})[\-_]?(\d{2})[\-_]?(\d{2})(?!\d)", base)
+    if m:
+        y, mo, d = m.groups()
+        try:
+            return pd.to_datetime(f"{y}-{mo}-{d}").date()
+        except Exception:
+            pass
+    # Try monthly files: YYYYMM or YYYY-MM -> treat as first of month
+    m = re.search(r"(?<!\d)(\d{6})(?!\d)", base)
+    if m:
+        s = m.group(1)
+        try:
+            return pd.to_datetime(s + "01", format="%Y%m%d").date()
+        except Exception:
+            pass
+    m = re.search(r"(?<!\d)(\d{4})[\-_]?(\d{2})(?!\d)", base)
+    if m:
+        y, mo = m.groups()
+        try:
+            return pd.to_datetime(f"{y}-{mo}-01").date()
+        except Exception:
+            pass
+    return None
+
+def _guess_date_from_path(fp):
+    base = os.path.basename(fp)
+    # Try ISO format: YYYY-MM-DDT.. (e.g., ERA5_2024-01-01T00_00_00_cp)
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})T", base)
+    if m:
+        y, mo, d = m.groups()
+        try:
+            return pd.to_datetime(f"{y}-{mo}-{d}").date()
+        except Exception:
+            pass
+    # Try YYYYMMDD
+    m = re.search(r"(\d{8})", base)
+    if m:
+        try:
+            return pd.to_datetime(m.group(1), format="%Y%m%d").date()
+        except Exception:
+            pass
+    return None
 
 class ERA5CubeDataset(Dataset):
     """
@@ -87,6 +147,7 @@ class ERA5CubeDataset(Dataset):
 
         # ---------- filter file paths ----------
         paths = [str(p) for p in files]
+        print(f"[ERA5CubeDataset] Found {len(paths)} files")
         existing = [p for p in paths if os.path.exists(p)]
         missing = [p for p in paths if not os.path.exists(p)]
         if missing:
@@ -105,6 +166,30 @@ class ERA5CubeDataset(Dataset):
 
         if not valid_files:
             raise ValueError("[ERA5CubeDataset] No valid ERA5 files left after filtering.")
+
+        # ---------- optional filename-based date prefilter BEFORE opening ----------
+        if time_start or time_end:
+            ts_date = pd.to_datetime(time_start).date() if time_start else None
+            te_date = pd.to_datetime(time_end).date() if time_end else None
+            pre_keep, pre_drop, no_date = [], [], []
+            for fp in valid_files:
+                d = _guess_date_from_path(fp)
+                if d is None:
+                    no_date.append(fp)
+                else:
+                    if (ts_date is None or d >= ts_date) and (te_date is None or d <= te_date):
+                        pre_keep.append(fp)
+                    else:
+                        pre_drop.append(fp)
+            if pre_drop:
+                previews = ", ".join(os.path.basename(p) for p in pre_drop[:3])
+                warnings.warn(f"[ERA5CubeDataset] Prefilter dropping {len(pre_drop)} files by filename date (e.g., {previews})")
+            if no_date:
+                previews = ", ".join(os.path.basename(p) for p in no_date[:3])
+                warnings.warn(f"[ERA5CubeDataset] {len(no_date)} files had no detectable date in name (e.g., {previews}); keeping them.")
+            valid_files = pre_keep + no_date
+            if not valid_files:
+                raise ValueError("[ERA5CubeDataset] No files left after filename date prefilter.")
 
         # ---------- open lazily with outer join on time ----------
         open_kwargs = dict(

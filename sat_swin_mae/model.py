@@ -39,10 +39,10 @@ class Encoder3D(nn.Module):
                 self.mask_token = nn.Parameter(torch.zeros(1,1,1,1,C))
                 nn.init.normal_(self.mask_token, std=0.02)
             # Do not reassign self.mask_token; use a local variable for device transfer
-        mask_token = self.mask_token
-        if mask_token.device != x.device:
-            mask_token = mask_token.to(x.device)
-        x = torch.where(mask.unsqueeze(-1), mask_token.expand_as(x), x)
+            mask_token = self.mask_token
+            if mask_token.device != x.device:
+                mask_token = mask_token.to(x.device)
+            x = torch.where(mask.unsqueeze(-1), mask_token.expand_as(x), x)
         feats = []
         for i, stage in enumerate(self.stages):
             x = stage(x)

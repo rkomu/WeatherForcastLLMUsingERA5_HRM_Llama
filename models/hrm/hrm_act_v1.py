@@ -212,6 +212,43 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
         
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
+    # === NEW: run HRM with precomputed embeddings (soft prompts + text) ===
+    def core_forward(self, inputs_embeds: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        inputs_embeds: (B, L, hidden_size)  — already scaled to tokens (e.g., soft prompts + text)
+        Returns hidden states (B, L, hidden_size) BEFORE the lm_head.
+        """
+        B, L, _ = inputs_embeds.shape
+
+        # Scale to match normal token path
+        x = (self.embed_scale * inputs_embeds).to(self.forward_dtype)
+
+        # Position encodings
+        cos_sin = None
+        if hasattr(self, "rotary_emb"):
+            cos, sin = self.rotary_emb()
+            # slice to current sequence length
+            cos_sin = (cos[:L], sin[:L])
+
+        # Init states (broadcast H/L init across sequence)
+        z_H = self.H_init.expand(B, L, self.config.hidden_size)
+        z_L = self.L_init.expand(B, L, self.config.hidden_size)
+
+        # Same ACT unroll as the standard forward (but we ignore puzzle embeddings here)
+        with torch.no_grad():
+            for _H_step in range(self.config.H_cycles):
+                for _L_step in range(self.config.L_cycles):
+                    if not ((_H_step == self.config.H_cycles - 1) and (_L_step == self.config.L_cycles - 1)):
+                        z_L = self.L_level(z_L, z_H + x, cos_sin=cos_sin)
+                if not (_H_step == self.config.H_cycles - 1):
+                    z_H = self.H_level(z_H, z_L, cos_sin=cos_sin)
+
+        # Final 1-step with grad
+        z_L = self.L_level(z_L, z_H + x, cos_sin=cos_sin)
+        z_H = self.H_level(z_H, z_L, cos_sin=cos_sin)
+
+        return z_H  # caller maps to logits with self.lm_head
+
 
 class HierarchicalReasoningModel_ACTV1(nn.Module):
     """ACT wrapper."""

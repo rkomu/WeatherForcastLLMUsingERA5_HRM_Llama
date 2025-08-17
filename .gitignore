@@ -10,3 +10,5 @@ wheels/
 .venv
 
 *.nc
+*.pt 
+mlruns/
