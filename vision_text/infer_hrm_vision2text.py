@@ -8,7 +8,7 @@ from models.hrm.hrm_lm_adapter import HRMAsTextLM
 import torch.multiprocessing as mp
 mp.set_start_method("spawn", force=True)
 import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 from glob import glob
 from datetime import datetime
@@ -168,6 +168,21 @@ def generate_greedy(hrm, tok_emb, prompts, tokenizer, max_new_tokens=64, tempera
         return [tokenizer.decode(ids.tolist()) for ids in input_ids]
     return ["<no-decode>"] * input_ids.size(0)
 
+def _guess_time_name(ds):
+    # prefer coords, then dims
+    candidates = ["valid_time", "time", "forecast_time", "analysis_time", "initial_time"]
+    for k in candidates:
+        if k in getattr(ds, "coords", {}):
+            return k
+    for k in candidates:
+        if k in getattr(ds, "dims", {}):
+            return k
+    # fallback: first datetime64-like coord
+    for k in ds.coords:
+        if "datetime64" in str(ds[k].dtype):
+            return k
+    return None
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--mae_ckpt', type=str, required=True)
@@ -246,20 +261,25 @@ def main():
     era5 = ERA5CubeDataset(file_list, args.variables, window, stride,
                            time_start=args.time_start, time_end=args.time_end)
 
-    times = pd.to_datetime(era5.data[era5.valid_time].values)  # valid_time handled in dataset
-    print(f"[infer] valid_time={era5.valid_time}, count={len(times)}")
+    time_name = _guess_time_name(era5.data)
+    if time_name is None:
+        raise SystemExit("[infer] Could not find a datetime coordinate in ERA5 dataset.")
+
+
+    times = pd.to_datetime(era5.data[time_name].values)
+    print(f"[infer] time_name={time_name}, count={len(times)}")
     print(f"[infer] first times: {times[:5]}")
     print(f"[infer] last  times: {times[-5:]}")
 
     # Peek computed window anchors for the first few windows
     anchors = []
-    for i in range(min(32, len(era5.indices))):  # era5.indices = list of (t0,h0,w0) or similar
-        t0 = era5.indices[i][0]
-        t_end = t0 + (era5.window_T - 1)
+    for i in range(min(32, len(era5.idxs))):  # era5.indices = list of (t0,h0,w0) or similar
+        t0 = era5.idxs[i][0]
+        t_end = t0 + (era5.window["T"] - 1)
         if args.anchor == "first":
             a = times[t0]
         elif args.anchor == "middle":
-            a = times[t0 + (era5.window_T // 2)]
+            a = times[t0 + (era5.window["T"] // 2)]
         else:  # last
             a = times[t_end]
         anchors.append(str(a))
