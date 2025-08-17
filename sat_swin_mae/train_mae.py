@@ -86,15 +86,83 @@ def parse_args():
     ap.add_argument("--val_files", nargs="+", required=False, help="(Optional) explicit validation files")
 
     # Data windowing
+    '''
+    A) Dataset window size (uppercase)
+
+    --window_T 8 --window_H 64 --window_W 64
+
+    This is the clip you extract from ERA5 before it goes into the model.
+        •	window_T = timesteps (time depth).
+        •	window_H/window_W = latitude/longitude grid size in cells.
+
+    Bigger windows = more context, but more memory and tokens after patching. With your values you take 8×64×64 cubes.
+
+    ⸻
+
+    B) Dataset sliding stride (uppercase)
+
+    --stride_T 4 --stride_H 32 --stride_W 32
+
+    How far you move the crop each time.
+        •	Here you use 50% overlap (half strides) in all three dims.
+        •	Temporal: 8→4 (half overlap).
+        •	Spatial: 64→32 (half overlap).
+
+    How many windows you get (per file region):
+    n = floor((Dim - window) / stride) + 1 per dimension; multiply T×H×W counts.
+
+    Example with global grid 721×1440 (from your logs):
+        •	H windows: floor((721-64)/32)+1 = 21
+        •	W windows: floor((1440-64)/32)+1 = 44
+        •	Spatial per timestep: 21×44 = 924 (matches your earlier printout)
+    '''
     ap.add_argument("--variables", nargs="+", required=True)
-    ap.add_argument("--window_T", type=int, default=24)
-    ap.add_argument("--window_H", type=int, default=64)
-    ap.add_argument("--window_W", type=int, default=64)
+    ap.add_argument("--window_T", type=int, default=24, help = "This is the clip you extract from ERA5 before it goes into the model. timesteps (time depth)")
+    ap.add_argument("--window_H", type=int, default=64, help = "This is the clip you extract from ERA5 before it goes into the model. latitude grid size in cells")
+    ap.add_argument("--window_W", type=int, default=64, help = "This is the clip you extract from ERA5 before it goes into the model. longitude grid size in cells.")
     ap.add_argument("--stride_T", type=int, default=24)
     ap.add_argument("--stride_H", type=int, default=32)
     ap.add_argument("--stride_W", type=int, default=32)
 
     # Training
+    '''
+    C) Patch embedding (tokenization to patches)
+
+    --patch_t 2 --patch_h 4 --patch_w 4
+
+    SatSwinMAE starts with a Conv3D that chops the cube into non-overlapping 3-D patches (kernel=stride=patch).
+        •	Tokens grid (before masking):
+        ```
+        T' = floor(window_T / patch_t)   = floor(8 / 2)  = 4
+        H' = floor(window_H / patch_h)   = floor(64 / 4) = 16
+        W' = floor(window_W / patch_w)   = floor(64 / 4) = 16
+        num_tokens = T'·H'·W' = 4·16·16 = 1,024
+        ```
+        	•	Tip: pick window_* as multiples of patch_* so you don’t drop edge cells.
+
+        Larger patches ↓tokens (cheaper but coarser); smaller patches ↑tokens (finer but heavier).
+
+        ⸻
+
+        D) Swin attention window (lowercase)
+
+        --window_t 2 --window_h 8 --window_w 8
+
+        This is the Swin Transformer’s local attention window size in token units, not raw grid cells. It operates after patching, on the T'×H'×W' token grid.
+
+        With the values above:
+            •	Token grid: T'×H'×W' = 4×16×16
+            •	Swin window: 2×8×8 tokens
+            •	Windows per block:
+             ```
+             (T'/window_t) × (H'/window_h) × (W'/window_w) = (4/2) × (16/8) × (16/8) = 2×2×2 = 8 windows
+             ```
+        	•	Each attention window sees 2·8·8 = 128 tokens.
+         
+        Compute per head scales like: #windows × (window_tokens)^2 = 8 × 128^2, which is ~8× cheaper than global attention on 1,024 tokens.
+
+        Rule of thumb: choose window_t/h/w that divide T'/H'/W' cleanly. If not, Swin pads internally.
+    '''
     ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--lr", type=float, default=2e-4)
