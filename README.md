@@ -1,191 +1,240 @@
-# Hierarchical Reasoning Model
 
-![](./assets/hrm.png)
+# WeatherLM: Vision-to-Text Weather Narratives from ERA5 using SatSwinMAE + HRM
 
-Reasoning, the process of devising and executing complex goal-oriented action sequences, remains a critical challenge in AI.
-Current large language models (LLMs) primarily employ Chain-of-Thought (CoT) techniques, which suffer from brittle task decomposition, extensive data requirements, and high latency. Inspired by the hierarchical and multi-timescale processing in the human brain, we propose the Hierarchical Reasoning Model (HRM), a novel recurrent architecture that attains significant computational depth while maintaining both training stability and efficiency.
-HRM executes sequential reasoning tasks in a single forward pass without explicit supervision of the intermediate process, through two interdependent recurrent modules: a high-level module responsible for slow, abstract planning, and a low-level module handling rapid, detailed computations. With only 27 million parameters, HRM achieves exceptional performance on complex reasoning tasks using only 1000 training samples. The model operates without pre-training or CoT data, yet achieves nearly perfect performance on challenging tasks including complex Sudoku puzzles and optimal path finding in large mazes.
-Furthermore, HRM outperforms much larger models with significantly longer context windows on the Abstraction and Reasoning Corpus (ARC), a key benchmark for measuring artificial general intelligence capabilities.
-These results underscore HRM’s potential as a transformative advancement toward universal computation and general-purpose reasoning systems.
+> **Scope** — This README explains the **technical design and rationale** for the model. It focuses on *what the pieces are*, *how they fit*, and *why we chose them*. (Setup/installation is intentionally omitted here.)
 
-## Quick Start Guide 🚀
+---
 
-### Prerequisites ⚙️
+## 1) Problem Statement & Design Goals
 
-Ensure PyTorch and CUDA are installed. The repo needs CUDA extensions to be built. If not present, run the following commands:
+We want a model that **looks at spatiotemporal meteorological fields (ERA5)** and **writes human-readable weather narratives**. The design must:
 
-```bash
-# Install CUDA 12.6
-CUDA_URL=https://developer.download.nvidia.com/compute/cuda/12.6.3/local_installers/cuda_12.6.3_560.35.05_linux.run
+- Respect the **3D structure** (channels × time × lat × lon).
+- Be **data efficient**: captioned weather text is scarce.
+- Leverage abundant **unlabeled** data to learn physical structure.
+- Produce **coherent, causal text** (e.g., “a trough deepens, showers spread east”).
 
-wget -q --show-progress --progress=bar:force:noscroll -O cuda_installer.run $CUDA_URL
-sudo sh cuda_installer.run --silent --toolkit --override
+**High-level answer:** Freeze a strong **3D masked autoencoder** for vision (SatSwinMAE) and a reasoning-oriented **language model** (HRM-ACTv1). Train only a small **Vision→Text adapter** that maps visual latents to **soft text prompts** consumed by HRM. This preserves each backbone’s strength and avoids catastrophic forgetting.
 
-export CUDA_HOME=/usr/local/cuda-12.6
+---
 
-# Install PyTorch with CUDA 12.6
-PYTORCH_INDEX_URL=https://download.pytorch.org/whl/cu126
+## 2) System Overview
 
-pip3 install torch torchvision torchaudio --index-url $PYTORCH_INDEX_URL
-
-# Additional packages for building extensions
-pip3 install packaging ninja wheel setuptools setuptools-scm
+```
+ERA5 windows (C × T × H × W)
+          │
+    SatSwinMAE encoder (frozen) ──► z: B × M× Dv   (visual latents)
+          │
+ Vision→Text Adapter (trainable) ──► P: B × M× dH  (soft prompts in HRM space)
+          │
+      HRM-ACTv1 (frozen LM) ───────► logits over vocab → text
 ```
 
-Then install FlashAttention. For Hopper GPUs, install FlashAttention 3
+- **SatSwinMAE** — 3D Swin Transformer + MAE pretraining to learn generic spatiotemporal structure.
+- **Adapter** — small MLP mapping vision latent dim **Dv** → HRM embed dim **dH**; outputs **M** soft prefix tokens.
+- **HRM-ACTv1** — hierarchical reasoning LM; consumes `inputs_embeds` (prefix + word embeddings) and emits token logits.
 
-```bash
-git clone git@github.com:Dao-AILab/flash-attention.git
-cd flash-attention/hopper
-python setup.py install
+**Why this separation?**  
+Self-supervised **vision pretraining** scales cheaply; **LM priors** handle discourse. **Adapter-only** training is stable and sample-efficient.
+
+---
+
+## 3) ERA5 Data → Windows
+
+- Variables (e.g., `u10`, `v10`, `t`, `r`, `sp`, `tp`, `ssrd`, ...). Pressure-level fields are stacked as channels → total **C** must match the SatSwinMAE checkpoint’s `in_chans`.
+- **Uppercase window** sizes: `window_T × window_H × window_W` (e.g., `8×64×64`).
+- **Uppercase stride**: `stride_T/H/W` controls overlap (e.g., `4/32/32` = 50% overlap).  
+- Time filtering: `--time_start/--time_end` trims the dataset; still need ≥`window_T` timesteps to form at least one clip.
+- **Anchor** (`first|middle|last`): defines which timestep’s date is used to join captions and select inference windows.
+
+**Spatial tiling example** (0.25° grid `721×1440`, window `64`, stride `32`):
+- `nH = floor((721-64)/32)+1 = 21`, `nW = floor((1440-64)/32)+1 = 44` → **924** crops per timestep.
+
+---
+
+## 4) SatSwinMAE (Vision Backbone) — What & Why
+
+### 4.1 Patch Embedding (Tokenization)
+- Conv3D with kernel=stride = `(patch_t, patch_h, patch_w)` (e.g., `2,4,4`) partitions the cube into **non-overlapping 3D patches**.
+- Token grid:
+  ```
+  T' = floor(T/patch_t), H' = floor(H/patch_h), W' = floor(W/patch_w)
+  tokens = T'·H'·W'
+  ```
+- **Why**: 3D patches respect temporal continuity and reduce sequence length in a physically sensible way. Choose `window_*` as multiples of `patch_*` to avoid edge drops.
+
+### 4.2 Swin Transformer (3D)
+- **Local attention** on token windows with **shifts** to connect neighborhoods.
+- **Lowercase window** sizes (in token units), e.g., `2×8×8`, divide the token grid for efficient attention.
+- **Why**: Mesoscale structure is locally coherent (fronts, jet streaks); windowed attention is **O(n·w²)** instead of **O(n²)** and empirically strong for geospatial data.
+
+### 4.3 Masked Autoencoding (MAE)
+- Randomly mask ~75% patches; reconstruct with a light decoder.
+- **Why**: Uses abundant unlabeled ERA5 to learn robust spatiotemporal features, capturing synoptic patterns without captions.
+
+### 4.4 For V2T
+- We freeze the encoder and extract **visual latents** `z ∈ ℝ^{B×(T'·H'·W')×Dv}`. We then **select or pool** latents to **M** tokens before the adapter (see §6).
+
+---
+
+## 5) HRM-ACTv1 (Language Backbone) — What & Why
+
+- **LM core**: embeddings → Transformer blocks with **RoPE**, **RMSNorm**, **SwiGLU** MLPs; **PyTorch SDPA** attention (portable & stable in fp32/bf16/fp16).
+- **Hierarchical reasoning**: two interacting levels (**H/L**) with configurable cycles; mimics coarse→fine iterative refinement.
+- **ACT (Adaptive Computation Time)**: halting head allows variable steps per example.
+- **Inputs-Embeds path**: `forward_with_embeds(inputs_embeds, attention_mask)` so the first **M** positions can be **soft prompts** from vision.
+
+**Why HRM (vs a generic LM)**: weather narratives often benefit from **iterative** reasoning (“if low deepens then…”). HRM’s H/L cycles and ACT provide a natural mechanism for this, even when frozen—the adapter learns to place prompts that guide these steps.
+
+---
+
+## 6) Vision→Text Adapter (Prefixer) — What, How, and **Why**
+
+### 6.1 What it does
+- Input: `z ∈ ℝ^{B×M×Dv}` (M selected/pooled vision tokens).
+- MLP: `Dv → dH` with **SiLU or GELU** activations, typically 2–4 layers, optional residual/LayerScale.
+- Output: `P ∈ ℝ^{B×M×dH}` — **soft prompt tokens** in the **same space** as HRM’s word embeddings.
+- Concatenate with text embeddings: `X = [P | E_y]`, then run HRM with `inputs_embeds`.
+
+### 6.2 Why “soft prompts” (prefix) and not cross-attention?
+- **Parameter & data efficiency**: a prefixer adds **tiny** parameter count; cross-attn adds full Q/K/V projections and blocks that are harder to train with limited captions.
+- **Architectural simplicity**: no surgery inside HRM; works with *any* LM that exposes `inputs_embeds`.
+- **Stability**: prefix-tuning is well-behaved with frozen LMs; gradients flow through the LM to the **inputs**, teaching the adapter alignment “vision → words” without destabilizing the LM.
+- **Sequence control**: the number of soft tokens **M** is explicit; we can budget HRM’s `seq_len` (`seq_len ≥ M + max_caption_len`).
+
+### 6.3 Why **SiLU/GELU** in the adapter MLP?
+We choose **smooth, non-linear activations** that are known to work well in Transformer MLPs and mixed-precision training.
+
+- **SiLU (Swish‑1)**: `x · sigmoid(x)`  
+  - **Smooth** and **non-monotonic** near 0 → richer gating behavior than ReLU.  
+  - **No hard zero** region → avoids “dead neurons”, keeps gradient flowing for small negatives.  
+  - Empirically strong in vision backbones and adapters; cheap to compute and AMP/bf16 friendly.
+- **GELU**: approximates input-dependent gating with a Gaussian CDF weighting.  
+  - Standard in BERT/ViT MLPs; similarly smooth; excellent with LayerNorm/RMSNorm statistics.  
+  - Slightly different curvature than SiLU; both work nearly interchangeably in practice.
+
+**Why not ReLU/tanh?**
+- **ReLU**: sparse gradients for negatives; adapters are small and must learn subtle alignments — losing gradient in half the domain hurts.  
+- **tanh**: bounded outputs saturate early; we want the adapter to reach the full **dH** dynamic range used by HRM’s token embeddings.
+
+**Practical rule**:  
+- Default to **SiLU** in the adapter (great gradient flow, lightweight).  
+- If you want to match HRM/ViT conventions exactly, use **GELU** — results are typically on par.
+
+### 6.4 Why an MLP (and not a heavier transformer) for the adapter?
+- **Inductive bias**: the heavy lifting (spatiotemporal abstraction) is already done by SatSwinMAE. The adapter’s job is **affine re-embedding** with mild nonlinearity into HRM’s space.  
+- **Overfitting risk**: with limited captions, a large adapter would overfit quickly.  
+- **Latency/VRAM**: smaller = faster and leaves budget for longer contexts if needed.
+
+### 6.5 How we pick **M** (number of prompt tokens)
+- Start with **M = 32**; try 16/64 in ablations.  
+- Ensure `HRM.seq_len ≥ M + max_caption_len`.  
+- Increasing **M** helps detail recall up to a point; too large → longer sequences with diminishing returns.
+
+### 6.6 Pooling/selection from the vision grid to M tokens — Why & options
+We often have many encoder tokens (`T'·H'·W'`). We reduce to **M** to keep HRM input compact:
+
+- **Mean pooling** per local block or global — **robust** and parameter-free; good baseline.  
+- **Attention pooling** with a few learned queries — focuses on salient synoptic structures.  
+- **Strided subsampling** — simplest path if token grid is already dense.
+
+**Why reduce?** HRM sequence budget is precious. Pooling summarizes redundant local patterns (e.g., broad stratiform cloud decks) without losing essential synoptic cues (lows, fronts, jets).
+
+---
+
+## 7) Training: What Learns & Why It Works
+
+- **Frozen**: SatSwinMAE, HRM weights.  
+- **Trainable**: the adapter MLP (and optionally pooling params).
+
+**Mechanism**: next-token **cross-entropy** on caption tokens. The loss backpropagates **through the frozen HRM** to the **adapter outputs** (prompts). The adapter learns to place the right vectors so HRM emits the desired words.
+
+**Loss baseline**: with a GPT‑2 tokenizer `V≈50k`, a uniform-guess CE ≈ `ln(V) ≈ 10.8` nats. Early loss around 10–11 is normal and quickly drops if the wiring is correct.
+
+**When to unfreeze**: if generations stay generic, unfreeze the **last HRM block** (or add **LoRA**) with a tiny LR (e.g., `1e‑5`) to better bind phrasing to visual cues.
+
+---
+
+## 8) Inference by Date — What & Why
+
+- **What**: choose windows whose **anchor timestep** matches `--date`. For each, extract latents, map to prompts, decode text.  
+- **Why**: date-driven evaluation reflects how forecasters summarize a day’s synoptic state; it also enables easy qualitative checks against known events.
+
+Key controls: `--date`, `--anchor`, `--time_start/--time_end`, `--window_*`, `--stride_*`, `--variables`, `--max_samples`.
+
+---
+
+## 9) Shapes & Math (Concise)
+
+- Cube `x ∈ ℝ^{B×C×T×H×W}`.  
+- Patch `(p_t,p_h,p_w)` → token grid `T'×H'×W'`.  
+- Encoder yields `z_grid ∈ ℝ^{B×(T'·H'·W')×Dv}` → pooled to `z ∈ ℝ^{B×M×Dv}`.  
+- Adapter `A: ℝ^{Dv}→ℝ^{dH}` → `P = A(z) ∈ ℝ^{B×M×dH}`.  
+- Text embeddings `E_y ∈ ℝ^{B×L×dH}`. Inputs: `X = [P | E_y]`.  
+- HRM `F(X) → logits ∈ ℝ^{B×(M+L)×V}`.  
+- Labels ignore prompts/pad (`-100`). Loss `CE(logits, labels)` updates **A** only.
+
+---
+
+## 10) Most Impactful Hyperparameters (and why)
+
+- **window_T/H/W vs patch_t/h/w**: controls **token count**; choose multiples to avoid edge losses.  
+- **Swin window_t/h/w**: wider windows capture broader context but raise attention cost per block.  
+- **M (prompt length)**: larger M carries more scene detail until it hits sequence limits.  
+- **Adapter activations (SiLU/GELU)**: smooth gradients, strong empirical performance in transformer MLPs, mixed‑precision friendly — critical for a **small** network tasked with fine alignment.  
+- **LR for adapter**: `1e‑4`–`5e‑4` typically; small warmup helps stability.  
+- **Precision**: start fp32 (debug), switch to bf16 for speed once stable.
+
+---
+
+## 11) Design Choices — Alternatives Considered (and why we didn’t pick them)
+
+- **Cross-attention fusion** (vision↔text): more expressive, but heavier, harder to stabilize with little text; more parameters and VRAM. Prefixer achieves most of the gain at a fraction of complexity.  
+- **Training HRM end‑to‑end**: risks forgetting general language competence; requires much more text; slower experiments.  
+- **ReLU/tanh in adapter**: poorer gradient flow / saturation; empirically worse for tiny adapters aligning two high‑dimensional manifolds.  
+- **FlashAttention**: great speed but fragile Python/Torch/CUDA build matrix; SDPA is portable and plenty fast for our sequence lengths.
+
+---
+
+## 12) Diagnostics & Tips
+
+- If loss ≈ 10.8 and flat: verify labels ignore prompts, adapter params in the optimizer, no `.detach()` on prompts, no `no_grad` wrapping the HRM forward with embeds.  
+- If “No windows”: widen time or lower `window_T` (≥ `patch_t`).  
+- Channel mismatch vs ckpt: ensure dataset variables/levels sum to the encoder’s expected `in_chans`.  
+- Keep `HRM.seq_len ≥ M + max_caption_len`.
+
+---
+
+## 13) Minimal Training Pseudocode
+
+```python
+with torch.no_grad():
+    z = mae.encode_tokens(cubes)            # (B, M, Dv)
+
+prompts = adapter(z)                        # (B, M, dH)
+E_y = hrm.embed_tokens(input_ids)           # (B, L, dH)
+
+X = torch.cat([prompts, E_y], dim=1)        # (B, M+L, dH)
+mask = torch.cat([torch.ones(B, M, device=X.device), text_attn], dim=1)
+
+logits = hrm.forward_with_embeds(X, attention_mask=mask)  # (B, M+L, V)
+
+labels = torch.full((B, M+L), -100, device=X.device, dtype=torch.long)
+labels[:, M:] = input_ids.masked_fill(~text_attn.bool(), -100)
+
+loss = F.cross_entropy(logits.view(-1, V), labels.view(-1), ignore_index=-100)
+loss.backward(); opt.step()
 ```
 
-For Ampere or earlier GPUs, install FlashAttention 2
+---
 
-```bash
-pip3 install flash-attn
-```
+## 14) File Layout (orientation)
 
-## Install Python Dependencies 🐍
+- `sat_swin_mae/` — encoder, patch/embed, MAE training.  
+- `models/hrm/` — HRM-ACTv1 (hierarchical LM), layers (SDPA attention).  
+- `vision_text/` — adapter training and date‑driven inference.  
+- `dataset_*` — ERA5 & caption datasets (multi‑caption per date).
 
-```bash
-pip install -r requirements.txt
-```
+---
 
-## W&B Integration 📈
-
-This project uses [Weights & Biases](https://wandb.ai/) for experiment tracking and metric visualization. Ensure you're logged in:
-
-```bash
-wandb login
-```
-
-## Run Experiments
-
-### Quick Demo: Sudoku Solver 💻🗲
-
-Train a master-level Sudoku AI capable of solving extremely difficult puzzles on a modern laptop GPU. 🧩
-
-```bash
-# Download and build Sudoku dataset
-python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000
-
-# Start training (single GPU, smaller batch size)
-OMP_NUM_THREADS=8 python pretrain.py data_path=data/sudoku-extreme-1k-aug-1000 epochs=20000 eval_interval=2000 global_batch_size=384 lr=7e-5 puzzle_emb_lr=7e-5 weight_decay=1.0 puzzle_emb_weight_decay=1.0
-```
-
-Runtime: ~10 hours on a RTX 4070 laptop GPU
-
-## Trained Checkpoints 🚧
-
- - [ARC-AGI-2](https://huggingface.co/sapientinc/HRM-checkpoint-ARC-2)
- - [Sudoku 9x9 Extreme (1000 examples)](https://huggingface.co/sapientinc/HRM-checkpoint-sudoku-extreme)
- - [Maze 30x30 Hard (1000 examples)](https://huggingface.co/sapientinc/HRM-checkpoint-maze-30x30-hard)
-
-To use the checkpoints, see Evaluation section below.
-
-## Full-scale Experiments 🔵
-
-Experiments below assume an 8-GPU setup.
-
-### Dataset Preparation
-
-```bash
-# Initialize submodules
-git submodule update --init --recursive
-
-# ARC-1
-python dataset/build_arc_dataset.py  # ARC offical + ConceptARC, 960 examples
-# ARC-2
-python dataset/build_arc_dataset.py --dataset-dirs dataset/raw-data/ARC-AGI-2/data --output-dir data/arc-2-aug-1000  # ARC-2 official, 1120 examples
-
-# Sudoku-Extreme
-python dataset/build_sudoku_dataset.py  # Full version
-python dataset/build_sudoku_dataset.py --output-dir data/sudoku-extreme-1k-aug-1000  --subsample-size 1000 --num-aug 1000  # 1000 examples
-
-# Maze
-python dataset/build_maze_dataset.py  # 1000 examples
-```
-
-### Dataset Visualization
-
-Explore the puzzles visually:
-
-* Open `puzzle_visualizer.html` in your browser.
-* Upload the generated dataset folder located in `data/...`.
-
-## Launch experiments
-
-### Small-sample (1K)
-
-ARC-1:
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py 
-```
-
-*Runtime:* ~24 hours
-
-ARC-2:
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/arc-2-aug-1000
-```
-
-*Runtime:* ~24 hours (checkpoint after 8 hours is often sufficient)
-
-Sudoku Extreme (1k):
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/sudoku-extreme-1k-aug-1000 epochs=20000 eval_interval=2000 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0
-```
-
-*Runtime:* ~10 minutes
-
-Maze 30x30 Hard (1k):
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/maze-30x30-hard-1k epochs=20000 eval_interval=2000 lr=1e-4 puzzle_emb_lr=1e-4 weight_decay=1.0 puzzle_emb_weight_decay=1.0
-```
-
-*Runtime:* ~1 hour
-
-### Full Sudoku-Hard
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 pretrain.py data_path=data/sudoku-hard-full epochs=100 eval_interval=10 lr_min_ratio=0.1 global_batch_size=2304 lr=3e-4 puzzle_emb_lr=3e-4 weight_decay=0.1 puzzle_emb_weight_decay=0.1 arch.loss.loss_type=softmax_cross_entropy arch.L_cycles=8 arch.halt_max_steps=8 arch.pos_encodings=learned
-```
-
-*Runtime:* ~2 hours
-
-## Evaluation
-
-Evaluate your trained models:
-
-* Check `eval/exact_accuracy` in W&B.
-* For ARC-AGI, follow these additional steps:
-
-```bash
-OMP_NUM_THREADS=8 torchrun --nproc-per-node 8 evaluate.py checkpoint=<CHECKPOINT_PATH>
-```
-
-* Then use the provided `arc_eval.ipynb` notebook to finalize and inspect your results.
-
-## Notes
-
- - Small-sample learning typically exhibits accuracy variance of around ±2 points.
- - For Sudoku-Extreme (1,000-example dataset), late-stage overfitting may cause numerical instability during training and Q-learning. It is advisable to use early stopping once the training accuracy approaches 100%.
-
-## Citation 📜
-
-```bibtex
-@misc{wang2025hierarchicalreasoningmodel,
-      title={Hierarchical Reasoning Model}, 
-      author={Guan Wang and Jin Li and Yuhao Sun and Xing Chen and Changling Liu and Yue Wu and Meng Lu and Sen Song and Yasin Abbasi Yadkori},
-      year={2025},
-      eprint={2506.21734},
-      archivePrefix={arXiv},
-      primaryClass={cs.AI},
-      url={https://arxiv.org/abs/2506.21734}, 
-}
-```
+*End of technical overview.*
