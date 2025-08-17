@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
+import math
 
 from sat_swin_mae.model import SatSwinMAE
 from vision_text.vision_adapter import VisionPrefixer
@@ -18,7 +19,7 @@ from functools import partial
 import torch.multiprocessing as mp
 mp.set_start_method("spawn", force=True)
 import os
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 def get_token_embedding_and_dim(hrm):
     emb = getattr(hrm, 'tok_emb', None) or getattr(hrm, 'embed_tokens', None)
@@ -123,6 +124,22 @@ def parse_args():
     ap.add_argument("--log_model_every_n_epochs", type=int, default=0,
                     help="Log model checkpoint to MLflow every N epochs. 0 means only log final model.")
     
+    ap.add_argument('--eval_every', type=int, default=1,
+                    help='Run evaluation every N epochs (0 disables).')
+    ap.add_argument('--eval_max_samples', type=int, default=32,
+                    help='Max number of samples to evaluate per eval run.')
+    ap.add_argument('--eval_log_samples', type=int, default=8,
+                    help='How many predictions to log to MLflow each eval.')
+    ap.add_argument('--max_gen_len', type=int, default=64,
+                    help='Max generation length for eval samples.')
+    ap.add_argument('--temperature', type=float, default=0.0,
+                    help='>0 enables sampling; 0 = greedy.')
+    ap.add_argument('--top_k', type=int, default=0,
+                    help='Top-k sampling (0 = disabled).')
+    ap.add_argument('--resume_adapter_ckpt', type=str, default=None,
+                    help='Path to adapter checkpoint to resume training from (either state_dict or full dict).')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='Random seed for reproducibility.')
     return ap.parse_args()
 
 def collate_with_pad(batch, pad_id: int):
@@ -137,6 +154,116 @@ def collate_with_pad(batch, pad_id: int):
         padded[i, :len(ids)] = ids
     attn = (padded != pad_id).long()
     return cubes, valids, padded, attn
+
+
+# ==================== Generation and Evaluation Helpers ====================
+def generate_text(adapter, hrm, tok_emb, tokenizer, cubes, device, max_gen_len=64, temperature=0.0, top_k=0):
+    adapter.eval()
+    hrm.eval()
+    with torch.no_grad():
+        prompts = adapter(cubes.to(device))  # (B,M,d)
+        B, M, d = prompts.shape
+        # Start token
+        bos_id = getattr(tokenizer, 'bos_token_id', None)
+        if bos_id is None:
+            bos_id = getattr(tokenizer, 'eos_token_id', 0)
+        gen = torch.full((B, 1), bos_id, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        for _ in range(max_gen_len):
+            txt_emb = tok_emb(gen)  # (B, L, d)
+            inputs_embeds = torch.cat([prompts, txt_emb], dim=1)
+            inputs_embeds = inputs_embeds.to(txt_emb.dtype)
+            attn = torch.ones((B, inputs_embeds.size(1)), dtype=torch.long, device=device)
+            out = forward_with_embeds(hrm, inputs_embeds, attention_mask=attn)
+            logits = out[0] if isinstance(out, (tuple, list)) else out
+            logits_last = logits[:, -1, :]
+            if temperature > 0.0:
+                probs = torch.softmax(logits_last / max(1e-6, temperature), dim=-1)
+                if top_k and top_k > 0:
+                    topk_vals, topk_idx = torch.topk(probs, k=top_k, dim=-1)
+                    topk_probs = topk_vals / topk_vals.sum(dim=-1, keepdim=True)
+                    next_ids = torch.multinomial(topk_probs, num_samples=1).squeeze(-1)
+                    next_ids = torch.gather(topk_idx, 1, next_ids.unsqueeze(-1)).squeeze(-1)
+                else:
+                    next_ids = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            else:
+                next_ids = torch.argmax(logits_last, dim=-1)
+            gen = torch.cat([gen, next_ids.unsqueeze(-1)], dim=-1)
+            eos_id = getattr(tokenizer, 'eos_token_id', None)
+            if eos_id is not None:
+                finished |= (next_ids == eos_id)
+            if bool(finished.all()):
+                break
+        # Decode
+        texts = []
+        for i in range(B):
+            seq = gen[i].tolist()
+            if len(seq) > 0 and seq[0] == bos_id:
+                seq = seq[1:]
+            texts.append(tokenizer.decode(seq, skip_special_tokens=True))
+        return texts
+
+
+def evaluate_model(args, adapter, hrm, tok_emb, tokenizer, eval_dl, device):
+    adapter.eval(); hrm.eval()
+    total_nll = 0.0
+    total_tokens = 0
+    logged = 0
+    samples = []
+    ignore = -100
+    with torch.no_grad():
+        for i, (cubes, valids, input_ids, text_attn) in enumerate(eval_dl):
+            cubes = cubes.to(device)
+            input_ids = input_ids.to(device)
+            text_attn = text_attn.to(device)
+            # forward like training to compute CE
+            prompts = adapter(cubes)
+            txt_emb = tok_emb(input_ids)
+            inputs_embeds = torch.cat([prompts, txt_emb], dim=1)
+            inputs_embeds = inputs_embeds.to(txt_emb.dtype)
+            B, M, _ = prompts.shape
+            prompt_attn = torch.ones((B, M), device=device, dtype=text_attn.dtype)
+            attn = torch.cat([prompt_attn, text_attn], dim=1)
+            labels_full = torch.full((B, M + input_ids.size(1)), ignore, device=device, dtype=torch.long)
+            labels_text = input_ids.masked_fill(~text_attn.bool(), ignore)
+            labels_full[:, M:] = labels_text
+            out = forward_with_embeds(hrm, inputs_embeds, attention_mask=attn)
+            logits = out[0] if isinstance(out, (tuple, list)) else out
+            # sum reduction to accumulate per-token NLL
+            loss_sum = nn.functional.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                labels_full.view(-1),
+                ignore_index=ignore,
+                reduction='sum'
+            )
+            n_toks = (labels_full != ignore).sum().item()
+            total_nll += float(loss_sum.item())
+            total_tokens += int(n_toks)
+
+            # collect a few generations to log
+            if logged < args.eval_log_samples:
+                # generate from the same cubes
+                gen_txt = generate_text(adapter, hrm, tok_emb, tokenizer, cubes, device,
+                                        max_gen_len=args.max_gen_len,
+                                        temperature=args.temperature,
+                                        top_k=args.top_k)
+                for b in range(min(len(gen_txt), args.eval_log_samples - logged)):
+                    gold_ids = input_ids[b][text_attn[b].bool()].tolist()
+                    gold_txt = tokenizer.decode(gold_ids, skip_special_tokens=True)
+                    samples.append({
+                        'pred': gen_txt[b],
+                        'gold': gold_txt
+                    })
+                    logged += 1
+
+            if args.eval_max_samples is not None and total_tokens > 0:
+                # rough stop when we've seen enough sequences
+                if logged >= args.eval_log_samples and (i+1) * eval_dl.batch_size >= args.eval_max_samples:
+                    break
+
+    avg_nll = total_nll / max(1, total_tokens)
+    ppl = math.exp(avg_nll) if avg_nll < 50 else float('inf')
+    return avg_nll, ppl, samples
 
 def main():
     args = parse_args()
@@ -208,6 +335,11 @@ def main():
 def run_training(args):
     """Main training logic separated for MLflow integration."""
     device = args.device
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
 
     # HRM + tokenizer
     hrm, tokenizer = load_hrm_and_tokenizer(device)
@@ -302,6 +434,29 @@ def run_training(args):
     for p in hrm.parameters(): p.requires_grad = False
     opt = torch.optim.AdamW(adapter.parameters(), lr=args.lr)
 
+    # ----- Resume from checkpoint logic -----
+    start_epoch = 1
+    if args.resume_adapter_ckpt:
+        ckpt = torch.load(args.resume_adapter_ckpt, map_location=device)
+        if isinstance(ckpt, dict) and any(k in ckpt for k in ['adapter','state_dict','model_state_dict']):
+            if 'adapter' in ckpt:
+                adapter.load_state_dict(ckpt['adapter'])
+            elif 'state_dict' in ckpt:
+                adapter.load_state_dict(ckpt['state_dict'])
+            elif 'model_state_dict' in ckpt:
+                adapter.load_state_dict(ckpt['model_state_dict'])
+            if 'optimizer' in ckpt:
+                try:
+                    opt.load_state_dict(ckpt['optimizer'])
+                except Exception:
+                    print('[resume] Optimizer state incompatible; continuing without it.')
+            if 'epoch' in ckpt:
+                start_epoch = int(ckpt['epoch']) + 1
+        else:
+            # assume plain state_dict
+            adapter.load_state_dict(ckpt)
+        print(f"[resume] Resumed adapter from {args.resume_adapter_ckpt}; start_epoch={start_epoch}")
+
     # Log model info to MLflow
     if not args.disable_mlflow:
         total_params = sum(p.numel() for p in adapter.parameters())
@@ -319,7 +474,11 @@ def run_training(args):
 
     os.makedirs(args.out_dir, exist_ok=True)
 
-    for epoch in range(1, args.epochs+1):
+    # Create separate eval DataLoader
+    eval_dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
+                         num_workers=args.num_workers, collate_fn=collate_fn)
+
+    for epoch in range(start_epoch, args.epochs + 1):
         adapter.train()
         total_loss = 0.0
         batch_count = 0
@@ -378,32 +537,50 @@ def run_training(args):
             
         print(f"Epoch {epoch}/{args.epochs} - Train Loss: {avg_train_loss:.4f}")
 
-        # Save checkpoint
+        # ===== Evaluation & MLflow logging =====
+        if args.eval_every and (epoch % args.eval_every == 0):
+            avg_nll, ppl, samples = evaluate_model(args, adapter, hrm, tok_emb, tokenizer, eval_dl, device)
+            if not args.disable_mlflow:
+                mlflow.log_metrics({
+                    'eval_nll': avg_nll,
+                    'eval_perplexity': ppl,
+                }, step=epoch)
+                # Log a text artifact with predictions vs gold
+                try:
+                    lines = []
+                    for j, s in enumerate(samples):
+                        lines.append(f"### Sample {j+1}\nPRED: {s['pred']}\nGOLD: {s['gold']}\n")
+                    text_blob = "\n\n".join(lines)
+                    mlflow.log_text(text_blob, f"eval/samples_epoch_{epoch}.txt")
+                except Exception:
+                    # Fallback: write to file then log_artifact
+                    tmp_path = os.path.join(args.out_dir, f"eval_samples_epoch_{epoch}.txt")
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        for j, s in enumerate(samples):
+                            f.write(f"### Sample {j+1}\nPRED: {s['pred']}\nGOLD: {s['gold']}\n\n")
+                    mlflow.log_artifact(tmp_path, artifact_path='eval')
+
+        # Save lightweight state_dict (backward compatible)
         checkpoint_path = os.path.join(args.out_dir, f"adapter_epoch{epoch}.pt")
         torch.save(adapter.state_dict(), checkpoint_path)
         print(f"Saved adapter_epoch{epoch}.pt")
-        
-        # Log model artifact to MLflow
+
+        # Save full checkpoint for resuming
+        full_ckpt_path = os.path.join(args.out_dir, f"adapter_epoch{epoch}_full.pt")
+        torch.save({
+            'epoch': epoch,
+            'adapter': adapter.state_dict(),
+            'optimizer': opt.state_dict(),
+            'args': vars(args),
+        }, full_ckpt_path)
+
+        # Log artifacts to MLflow
         if not args.disable_mlflow:
-            # Log checkpoint artifact for every specified epoch or final epoch
-            should_log_model = (
-                epoch == args.epochs or  # Always log final model
-                (args.log_model_every_n_epochs > 0 and epoch % args.log_model_every_n_epochs == 0)
-            )
-            
-            if should_log_model:
-                try:
-                    # Log the PyTorch model
-                    mlflow.pytorch.log_model(
-                        adapter, 
-                        f"adapter_epoch_{epoch}",
-                        registered_model_name=f"{args.mlflow_experiment_name}_adapter" if epoch == args.epochs else None
-                    )
-                    # Log the checkpoint file
-                    mlflow.log_artifact(checkpoint_path, "checkpoints")
-                    print(f"Logged adapter model and checkpoint for epoch {epoch}")
-                except Exception as e:
-                    print(f"Warning: Failed to log model to MLflow: {e}")
+            try:
+                mlflow.log_artifact(checkpoint_path, "checkpoints")
+                mlflow.log_artifact(full_ckpt_path, "checkpoints_full")
+            except Exception as e:
+                print(f"Warning: Failed to log checkpoint artifacts: {e}")
 
 if __name__ == '__main__':
     main()
