@@ -112,7 +112,7 @@ def load_hrm_and_tokenizer(device):
         "halt_max_steps": 16,
         "halt_exploration_prob": 0.0,
 
-        "forward_dtype": "float32",        # safer default on consumer GPUs
+        "forward_dtype": "float16",        # safer default on consumer GPUs
     }
 
     hrm_full = HierarchicalReasoningModel_ACTV1(cfg).to(device).eval()
@@ -224,7 +224,7 @@ def main():
     d_vis = args.embed_dim * (2 ** (len(args.depths)-1))
     adapter = VisionPrefixer(mae, d_vis=d_vis, d_model=d_model,
                              n_latents=args.n_latents, n_layers=args.adapter_layers, n_heads=args.adapter_heads).to(device)
-    adapter.load_state_dict(torch.load(args.adapter_ckpt, map_location=device), strict=False)
+    adapter.load_state_dict(torch.load(args.adapter_ckpt, map_location=device, weights_only=True), strict=False)
     adapter.eval()
 
     # -------- Build ERA5 dataset and select windows by date --------
