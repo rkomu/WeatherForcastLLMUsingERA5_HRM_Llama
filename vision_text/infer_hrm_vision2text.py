@@ -13,6 +13,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from glob import glob
 from datetime import datetime
 from sat_swin_mae.dataset_era5 import ERA5CubeDataset
+import pandas as pd
 
 def expand_input_files(paths):
     out = []
@@ -46,23 +47,32 @@ def window_indices_for_date(inner_ds, window, target_date_str, anchor="last"):
     Returns a list of indices (into inner_ds.idxs) whose anchor timestep date equals target_date_str (YYYY-MM-DD).
     """
     import pandas as pd
+    # Identify the time coordinate in the dataset
     time_name = _find_time_coord(inner_ds.data)
+    # Convert dataset time values into pandas datetime objects
     times = pd.to_datetime(inner_ds.data[time_name].values)  # ndarray of datetimes
+    # Convert the target date string into a Python date object
     target_date = pd.to_datetime(target_date_str).date()
-    T_w = window["T"]
+    T_w = window["T"]  # number of timesteps in each window
     matches = []
+    # Iterate over all indexed windows in the dataset
     for wi, (t0, y, x) in enumerate(inner_ds.idxs):
+        # Determine which timestep in the window to use as the "anchor"
         if anchor == "first":
-            ti = t0
+            ti = t0  # first timestep
         elif anchor == "middle":
-            ti = t0 + (T_w // 2)
+            ti = t0 + (T_w // 2)  # middle timestep
         else:
-            ti = t0 + T_w - 1
+            ti = t0 + T_w - 1  # last timestep
+        # Skip if the anchor index is outside the range of available times
         if ti >= len(times):
             continue
+        # Get the date at the chosen anchor timestep
         d = times[ti].date()
+        # If the date matches the target date, record the window index
         if d == target_date:
             matches.append(wi)
+    # Return all window indices that matched the target date
     return matches
 
 def get_token_embedding_and_dim(hrm):
@@ -235,6 +245,26 @@ def main():
     stride = {'T': args.stride_T, 'H': args.stride_H, 'W': args.stride_W}
     era5 = ERA5CubeDataset(file_list, args.variables, window, stride,
                            time_start=args.time_start, time_end=args.time_end)
+
+    times = pd.to_datetime(era5.data[era5.valid_time].values)  # valid_time handled in dataset
+    print(f"[infer] valid_time={era5.valid_time}, count={len(times)}")
+    print(f"[infer] first times: {times[:5]}")
+    print(f"[infer] last  times: {times[-5:]}")
+
+    # Peek computed window anchors for the first few windows
+    anchors = []
+    for i in range(min(32, len(era5.indices))):  # era5.indices = list of (t0,h0,w0) or similar
+        t0 = era5.indices[i][0]
+        t_end = t0 + (era5.window_T - 1)
+        if args.anchor == "first":
+            a = times[t0]
+        elif args.anchor == "middle":
+            a = times[t0 + (era5.window_T // 2)]
+        else:  # last
+            a = times[t_end]
+        anchors.append(str(a))
+    print("[infer] sample anchors:", anchors[:10])
+
     match_idxs = window_indices_for_date(era5, window, args.date, anchor=args.anchor)
     if not match_idxs:
         raise SystemExit(f"[infer] No windows found anchored on date {args.date}. Try a different --date/--anchor or adjust --time_start/--time_end.")
