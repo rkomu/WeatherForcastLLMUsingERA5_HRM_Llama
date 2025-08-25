@@ -59,3 +59,4 @@ class VisionPrefixer(nn.Module):
         z = self.proj(z)                      # (B,L,d_model)
         prompts = self.resampler(z)           # (B,M,d_model)
         return prompts
+

@@ -171,6 +171,7 @@ class ERA5CubeDataset(Dataset):
         if time_start or time_end:
             ts_date = pd.to_datetime(time_start).date() if time_start else None
             te_date = pd.to_datetime(time_end).date() if time_end else None
+            print(f"[ERA5CubeDataset] date prefilter: time_start={ts_date}, time_end={te_date}")
             pre_keep, pre_drop, no_date = [], [], []
             for fp in valid_files:
                 d = _guess_date_from_path(fp)
@@ -187,6 +188,7 @@ class ERA5CubeDataset(Dataset):
             if no_date:
                 previews = ", ".join(os.path.basename(p) for p in no_date[:3])
                 warnings.warn(f"[ERA5CubeDataset] {len(no_date)} files had no detectable date in name (e.g., {previews}); keeping them.")
+            print(f"[ERA5CubeDataset] Prefiltered {len(valid_files)} files to {len(pre_keep)} valid files after date check.")
             valid_files = pre_keep + no_date
             if not valid_files:
                 raise ValueError("[ERA5CubeDataset] No files left after filename date prefilter.")
