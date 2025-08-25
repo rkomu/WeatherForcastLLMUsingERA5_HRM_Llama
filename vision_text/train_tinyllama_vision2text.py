@@ -8,6 +8,7 @@
 #   - MLflow logging
 #   - Periodic evaluation on a validation split
 #   - Optional sample generation from soft prompts (logs to MLflow)
+#   - QLoRA support (4-bit loading + LoRA on the LM)
 
 import os
 import csv
@@ -22,6 +23,10 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# NEW: QLoRA imports
+from transformers import BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
 # local modules
 from sat_swin_mae.model import SatSwinMAE
@@ -273,27 +278,33 @@ def collate_v2t(batch, pad_id: int):
 
 # ----------------- model wrapper -----------------
 class TinyLlamaV2T(nn.Module):
-    def __init__(self, mae, prefixer, lm, n_latents, pad_id):
+    def __init__(self, mae, prefixer, lm, n_latents, pad_id, freeze_lm: bool = False):
         super().__init__()
         self.mae = mae.eval()
         for p in self.mae.parameters():
             p.requires_grad = False
         self.prefixer = prefixer
         self.lm = lm
-        for p in self.lm.parameters():
-            p.requires_grad = False
+        if freeze_lm:
+            for p in self.lm.parameters():
+                p.requires_grad = False
         self.n_latents = n_latents
         self.pad_id = pad_id
-        # capture LM dtype once (bfloat16 if you loaded it that way)
-        self.lm_dtype = next(self.lm.parameters()).dtype
+        # LM compute dtype: try embedding weight dtype (works with 4-bit/LoRA), fallback to bf16/fp16/cpu
+        try:
+            self.lm_dtype = self.lm.get_input_embeddings().weight.dtype
+        except Exception:
+            self.lm_dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else (
+                torch.float16 if torch.cuda.is_available() else torch.float32
+            )
 
     def forward(self, cubes: torch.Tensor, _valids: torch.Tensor, input_ids: torch.Tensor):
         # Prefixer calls MAE internally; cubes: (B,C,T,H,W)
         assert cubes.ndim == 5, f"expected (B,C,T,H,W), got {tuple(cubes.shape)}"
-        soft = self.prefixer(cubes).to(self.lm_dtype)  # (B, n_latents, d_model) -> cast to LM dtype
+        soft = self.prefixer(cubes).to(self.lm_dtype)  # (B, n_latents, d_model)
 
         tok_emb = self.lm.get_input_embeddings()
-        text_emb = tok_emb(input_ids).to(self.lm_dtype)  # cast to LM dtype
+        text_emb = tok_emb(input_ids).to(self.lm_dtype)
 
         inputs_embeds = torch.cat([soft, text_emb], dim=1)
         attn = torch.ones(inputs_embeds.size()[:-1], dtype=torch.long, device=inputs_embeds.device)
@@ -359,7 +370,7 @@ def build_argparser():
     # tokenizer / LM
     ap.add_argument("--model_name", type=str, default="TinyLlama/TinyLlama_v1.1")
     ap.add_argument("--max_target_len", type=int, default=128)
-    ap.add_argument("--train_lm", action="store_true")
+    ap.add_argument("--train_lm", action="store_true", help="Full-finetune LM (ignored if --use_qlora)")
 
     # adapter
     ap.add_argument("--n_latents", type=int, default=32)
@@ -384,6 +395,18 @@ def build_argparser():
     ap.add_argument("--mlflow_run_name", type=str, default=None)
     ap.add_argument("--mlflow_tags", nargs="+", default=None)
     ap.add_argument("--log_model_every_n_epochs", type=int, default=0, help="0=only final")
+
+    # ---------------- QLoRA options ----------------
+    ap.add_argument("--use_qlora", action="store_true", help="Enable 4-bit loading and LoRA fine-tuning")
+    ap.add_argument("--lora_r", type=int, default=16)
+    ap.add_argument("--lora_alpha", type=int, default=32)
+    ap.add_argument("--lora_dropout", type=float, default=0.05)
+    ap.add_argument("--lora_target_modules", nargs="+", default=[
+        "q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj"
+    ])
+    ap.add_argument("--bnb_4bit_quant_type", type=str, default="nf4", choices=["nf4","fp4"])
+    ap.add_argument("--bnb_double_quant", action="store_true", help="Use double quantization in 4-bit")
+    ap.add_argument("--grad_checkpointing", action="store_true", help="Enable gradient checkpointing for LM")
 
     return ap
 
@@ -503,16 +526,60 @@ def main():
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token if tok.eos_token is not None else tok.unk_token
 
-    lm = AutoModelForCausalLM.from_pretrained(
-        args.model_name,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        low_cpu_mem_usage=True
-    ).to(args.device)
-    lm.eval()
-    if args.train_lm:
+    # ---------------- Load LM (standard or QLoRA) ----------------
+    if args.use_qlora:
+        bf16_ok = torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=args.bnb_4bit_quant_type,
+            bnb_4bit_use_double_quant=args.bnb_double_quant,
+            bnb_4bit_compute_dtype=torch.bfloat16 if bf16_ok else torch.float16,
+        )
+        device_map = None
+        # place whole model on a single device if user specified one CUDA device
+        if isinstance(args.device, str) and args.device.startswith("cuda"):
+            device_map = {"": args.device}
+
+        lm = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            quantization_config=bnb_config,
+            device_map=device_map,
+            trust_remote_code=True,
+            low_cpu_mem_usage=True,
+        )
+        # k-bit prep + optional grad checkpointing
+        lm = prepare_model_for_kbit_training(lm)
+        if args.grad_checkpointing:
+            lm.gradient_checkpointing_enable()
+            try:
+                lm.config.use_cache = False
+            except Exception:
+                pass
+
+        # LoRA
+        lora_cfg = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            lora_dropout=args.lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+            target_modules=args.lora_target_modules,
+        )
+        lm = get_peft_model(lm, lora_cfg)
+        lm.print_trainable_parameters()
+        # Important: train mode for LoRA
         lm.train()
-        for p in lm.parameters():
-            p.requires_grad = True
+    else:
+        lm = AutoModelForCausalLM.from_pretrained(
+            args.model_name,
+            torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+            low_cpu_mem_usage=True
+        ).to(args.device)
+        lm.eval()
+        if args.train_lm:
+            lm.train()
+            for p in lm.parameters():
+                p.requires_grad = True
 
     # Captions
     captions = load_captions(
@@ -573,7 +640,7 @@ def main():
         ckpt2 = _strip_relpos_keys(ckpt)
         missing, unexpected = mae.load_state_dict(ckpt2, strict=False)
 
-    mae.to(args.device).eval()
+    mae = mae.to(args.device).eval()
     for p in mae.parameters():
         p.requires_grad = False
 
@@ -591,12 +658,13 @@ def main():
         n_heads=args.adapter_heads, dropout=args.dropout
     ).to(args.device)
 
-    model = TinyLlamaV2T(mae, prefixer, lm, n_latents=args.n_latents, pad_id=tok.pad_token_id).to(args.device)
+    # Freeze LM only if not training (no LoRA and no full-FT)
+    freeze_lm_flag = not (args.use_qlora or args.train_lm)
+    model = TinyLlamaV2T(mae, prefixer, lm, n_latents=args.n_latents, pad_id=tok.pad_token_id,
+                         freeze_lm=freeze_lm_flag).to(args.device if not args.use_qlora else args.device)
 
-    # Optimizer (adapter only unless --train_lm)
-    params = list(prefixer.parameters())
-    if args.train_lm:
-        params += [p for p in lm.parameters() if p.requires_grad]
+    # Optimizer (adapter always; plus LM params that require_grad—LoRA if QLoRA)
+    params = list(prefixer.parameters()) + [p for p in lm.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr)
 
     # ------------- MLflow init -------------
@@ -610,6 +678,7 @@ def main():
         mlflow.set_tag("model_type", "TinyLlama_Vision2Text")
         mlflow.set_tag("framework", "PyTorch")
         mlflow.set_tag("task", "vision-to-text")
+        mlflow.set_tag("use_qlora", str(args.use_qlora))
         if args.mlflow_tags:
             for tag in args.mlflow_tags:
                 if "=" in tag:
@@ -630,6 +699,11 @@ def main():
             "gen_samples": args.gen_samples, "gen_max_new_tokens": args.gen_max_new_tokens,
             "gen_temperature": args.gen_temperature, "gen_top_p": args.gen_top_p,
             "eval_every": args.eval_every,
+            "lora_r": args.lora_r, "lora_alpha": args.lora_alpha, "lora_dropout": args.lora_dropout,
+            "lora_target_modules": ",".join(args.lora_target_modules),
+            "bnb_4bit_quant_type": args.bnb_4bit_quant_type,
+            "bnb_double_quant": args.bnb_double_quant,
+            "grad_checkpointing": args.grad_checkpointing
         })
         # dataset info
         mlflow.log_params({
@@ -672,7 +746,7 @@ def main():
         if use_mlflow:
             mlflow.log_metric("train_loss", avg_train, step=epoch)
 
-        # Save adapter checkpoint
+        # Save adapter checkpoint (VisionPrefixer)
         ckpt_path = os.path.join(args.out_dir, f"adapter_epoch{epoch}.pt")
         torch.save(prefixer.state_dict(), ckpt_path)
         if use_mlflow and (args.log_model_every_n_epochs > 0 and epoch % args.log_model_every_n_epochs == 0):
@@ -680,6 +754,16 @@ def main():
                 mlflow.log_artifact(ckpt_path, artifact_path="checkpoints")
             except Exception as e:
                 print(f"[MLflow] Warning: failed to log checkpoint: {e}")
+
+        # If QLoRA, also save LoRA adapter each epoch (small)
+        if args.use_qlora:
+            lora_dir = os.path.join(args.out_dir, f"lora_epoch{epoch}")
+            os.makedirs(lora_dir, exist_ok=True)
+            try:
+                model.lm.save_pretrained(lora_dir)
+                tok.save_pretrained(lora_dir)
+            except Exception as e:
+                print(f"[LoRA] Warning: failed to save LoRA at epoch {epoch}: {e}")
 
         # ---------- EVAL ----------
         do_eval = (args.eval_every > 0 and (epoch % args.eval_every == 0)) or (epoch == args.epochs)
@@ -711,9 +795,19 @@ def main():
             except Exception as e:
                 print(f"[MLflow] Warning: failed to log final checkpoint: {e}")
 
-    # Save final adapter
+    # Save final adapters
     final_path = os.path.join(args.out_dir, "adapter_final.pt")
     torch.save(prefixer.state_dict(), final_path)
+
+    if args.use_qlora:
+        lora_final_dir = os.path.join(args.out_dir, "lora_final")
+        os.makedirs(lora_final_dir, exist_ok=True)
+        try:
+            model.lm.save_pretrained(lora_final_dir)
+            tok.save_pretrained(lora_final_dir)
+        except Exception as e:
+            print(f"[LoRA] Warning: failed to save final LoRA: {e}")
+
     if use_mlflow:
         try:
             mlflow.log_artifact(final_path, artifact_path="checkpoints")
