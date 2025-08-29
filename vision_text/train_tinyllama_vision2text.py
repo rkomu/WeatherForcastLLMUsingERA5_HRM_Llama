@@ -9,13 +9,18 @@
 #   - Periodic evaluation on a validation split
 #   - Optional sample generation from soft prompts (logs to MLflow)
 #   - QLoRA support (4-bit loading + LoRA on the LM)
+#   - Ground-truth aware evaluation: logs GT vs. prediction pairs + metrics to MLflow
+#   - Per-batch logging: loss, time, throughput, grad-norm
 
 import os
 import csv
 import glob
+import math
 import argparse
+import difflib
+import time  # <-- NEW
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Tuple, Any
 
 import torch
 import torch.nn as nn
@@ -171,6 +176,17 @@ class ERA5CaptionWindows(Dataset):
     Wraps ERA5CubeDataset and assigns a caption per window:
       - If captions.layout == "path": use a global caption matched by file path/basename.
       - If captions.layout == "date": match window's anchor timestamp to CSV 'date'.
+
+    Returns each sample as:
+        (cube, valid, token_ids, meta_dict)
+    where meta_dict contains:
+        {
+          "layout": "path" | "date" | "none",
+          "caption_text": <string>,
+          "date_key": <YYYY-MM-DD or None>,
+          "anchor_time": <ISO timestamp or None>,
+          "index": <int window index>
+        }
     """
     def __init__(self, a: V2TArgs):
         self.inner = ERA5CubeDataset(
@@ -183,8 +199,8 @@ class ERA5CaptionWindows(Dataset):
         self.anchor = a.anchor
         self.captions = a.captions
 
-        # Prepare samples of (window_index, token_ids)
-        self.samples: List[Tuple[int, torch.Tensor]] = []
+        # Prepare samples of (window_index, token_ids, meta)
+        self.samples: List[Tuple[int, torch.Tensor, Dict[str, Any]]] = []
 
         if self.captions.layout == "path":
             global_cap = None
@@ -219,7 +235,15 @@ class ERA5CaptionWindows(Dataset):
                 self.tok.encode(global_cap or "", truncation=True, max_length=self.max_len, add_special_tokens=True),
                 dtype=torch.long
             )
-            self.samples = [(i, token_ids) for i in range(len(self.inner))]
+            for i in range(len(self.inner)):
+                meta = {
+                    "layout": "path",
+                    "caption_text": global_cap or "",
+                    "date_key": None,
+                    "anchor_time": None,
+                    "index": i,
+                }
+                self.samples.append((i, token_ids, meta))
             print(f"[captions] layout=path  applied 1 caption to {len(self.samples)} windows.")
             return
 
@@ -249,7 +273,14 @@ class ERA5CaptionWindows(Dataset):
                 self.tok.encode(cap or "", truncation=True, max_length=self.max_len, add_special_tokens=True),
                 dtype=torch.long
             )
-            self.samples.append((i, token_ids))
+            meta = {
+                "layout": "date",
+                "caption_text": cap or "",
+                "date_key": str(date_key.date()),
+                "anchor_time": pd.Timestamp(times[ta]).isoformat(),
+                "index": i,
+            }
+            self.samples.append((i, token_ids, meta))
             if cap is not None:
                 matched += 1
 
@@ -260,20 +291,21 @@ class ERA5CaptionWindows(Dataset):
         return len(self.samples)
 
     def __getitem__(self, i):
-        wi, token_ids = self.samples[i]
+        wi, token_ids, meta = self.samples[i]
         cube, valid = self.inner[wi]  # cube: (C,T,H,W), valid: (T,H,W)
-        return cube, valid, token_ids
+        return cube, valid, token_ids, meta
 
 
 def collate_v2t(batch, pad_id: int):
-    cubes, valids, ids = zip(*batch)
+    cubes, valids, ids, metas = zip(*batch)
     cubes = torch.stack(cubes, dim=0)   # (B,C,T,H,W)
     valids = torch.stack(valids, dim=0) # (B,T,H,W)
     maxL = max(x.numel() for x in ids)
     out = torch.full((len(ids), maxL), pad_id, dtype=torch.long)
     for i, seq in enumerate(ids):
         out[i, :seq.numel()] = seq
-    return cubes, valids, out
+    # metas is a tuple of dicts -> keep as list
+    return cubes, valids, out, list(metas)
 
 
 # ----------------- model wrapper -----------------
@@ -408,7 +440,221 @@ def build_argparser():
     ap.add_argument("--bnb_double_quant", action="store_true", help="Use double quantization in 4-bit")
     ap.add_argument("--grad_checkpointing", action="store_true", help="Enable gradient checkpointing for LM")
 
+    # ---------------- Testing / reporting ----------------
+    ap.add_argument("--test_only", action="store_true", help="Skip training; run eval + prediction logging on val set")
+    ap.add_argument("--log_val_samples", type=int, default=64, help="Max # of (GT,pred) pairs to log/export")
+    ap.add_argument("--max_eval_batches", type=int, default=128, help="Max # of batches to scan in eval logging")
+
+    # ---------------- Per-batch logging ----------------
+    ap.add_argument("--batch_log_freq", type=int, default=1, help="Log every N batches to MLflow (1=every batch)")
+
     return ap
+
+
+# ----------------- metrics & logging utils -----------------
+def _levenshtein(a: str, b: str) -> int:
+    """Simple DP Levenshtein distance on characters."""
+    la, lb = len(a), len(b)
+    if la == 0: return lb
+    if lb == 0: return la
+    prev = list(range(lb + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * lb
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(prev[j] + 1,         # deletion
+                         cur[j-1] + 1,        # insertion
+                         prev[j-1] + cost)    # substitution
+        prev = cur
+    return prev[lb]
+
+
+def _token_f1(pred: str, ref: str) -> float:
+    p = pred.strip().split()
+    r = ref.strip().split()
+    if not p and not r: return 1.0
+    if not p or not r: return 0.0
+    inter = sum(min(p.count(w), r.count(w)) for w in set(p))
+    precision = inter / len(p) if p else 0.0
+    recall = inter / len(r) if r else 0.0
+    return 0.0 if (precision + recall) == 0 else 2 * precision * recall / (precision + recall)
+
+
+def _simple_similarity(pred: str, ref: str) -> float:
+    return difflib.SequenceMatcher(None, pred, ref).ratio()
+
+
+def count_params(module: nn.Module, trainable_only: bool = False) -> int:
+    return sum(p.numel() for p in module.parameters() if (p.requires_grad or not trainable_only))
+
+
+@torch.no_grad()
+def evaluate_loss(model: "TinyLlamaV2T", loader: DataLoader, device: str) -> float:
+    model.eval()
+    total, count = 0.0, 0
+    for cubes, valids, input_ids, _ in loader:
+        cubes = cubes.to(device, non_blocking=True)
+        valids = valids.to(device, non_blocking=True)
+        input_ids = input_ids.to(device)
+        loss = model(cubes, valids, input_ids)
+        total += float(loss.item()) * cubes.size(0)
+        count += cubes.size(0)
+    return total / max(1, count)
+
+
+@torch.no_grad()
+def eval_and_log_predictions(model: "TinyLlamaV2T",
+                             loader: DataLoader,
+                             tok: AutoTokenizer,
+                             args,
+                             device: str,
+                             epoch_or_step: int,
+                             use_mlflow: bool) -> Dict[str, float]:
+    """
+    Generate predictions on the val loader, compute simple text metrics against ground truth,
+    and log GT|pred pairs and metrics to MLflow. Returns aggregated metrics.
+    """
+    model.eval()
+    eos_id = tok.eos_token_id or tok.pad_token_id
+    rows: List[Dict[str, Any]] = []
+    n_logged = 0
+    n_seen_batches = 0
+
+    for cubes, valids, input_ids, metas in loader:
+        n_seen_batches += 1
+        cubes = cubes.to(device, non_blocking=True)
+        # Decode GT texts
+        gt_texts = tok.batch_decode(input_ids, skip_special_tokens=True)
+
+        # Generate predictions one per sample for clarity (can be batched too)
+        for i in range(cubes.size(0)):
+            if n_logged >= args.log_val_samples:
+                break
+            sample_cube = cubes[i:i+1]
+            gen_ids = model.generate_from_cubes(
+                sample_cube,
+                max_new_tokens=args.gen_max_new_tokens,
+                eos_token_id=eos_id,
+                temperature=args.gen_temperature,
+                top_p=args.gen_top_p
+            )
+            pred = tok.decode(gen_ids[0], skip_special_tokens=True)
+            gt = gt_texts[i] if i < len(gt_texts) else ""
+            meta = metas[i] if i < len(metas) else {}
+            # Metrics
+            f1 = _token_f1(pred, gt)
+            sim = _simple_similarity(pred, gt)
+            cer = _levenshtein(pred, gt) / max(1, len(gt))
+            rows.append({
+                "index": meta.get("index"),
+                "layout": meta.get("layout"),
+                "date_key": meta.get("date_key"),
+                "anchor_time": meta.get("anchor_time"),
+                "gt": gt,
+                "pred": pred,
+                "len_gt": len(gt),
+                "len_pred": len(pred),
+                "token_f1": f1,
+                "seqmatch_sim": sim,
+                "char_error_rate": cer,
+            })
+            n_logged += 1
+        if n_logged >= args.log_val_samples or n_seen_batches >= args.max_eval_batches:
+            break
+
+    # Aggregate
+    if rows:
+        avg_f1 = float(sum(r["token_f1"] for r in rows) / len(rows))
+        avg_sim = float(sum(r["seqmatch_sim"] for r in rows) / len(rows))
+        avg_cer = float(sum(r["char_error_rate"] for r in rows) / len(rows))
+    else:
+        avg_f1 = avg_sim = 0.0
+        avg_cer = 1.0
+
+    metrics = {
+        "val_token_f1": avg_f1,
+        "val_seqmatch_sim": avg_sim,
+        "val_char_error_rate": avg_cer,
+        "val_pairs_logged": len(rows)
+    }
+
+    # Export artifacts
+    os.makedirs(args.out_dir, exist_ok=True)
+    csv_path = os.path.join(args.out_dir, f"val_predictions_epoch{epoch_or_step}.csv")
+    try:
+        import pandas as _pd
+        _pd.DataFrame(rows).to_csv(csv_path, index=False)
+    except Exception:
+        # lightweight CSV writer if pandas not available for some reason
+        import csv as _csv
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else
+                                ["index","layout","date_key","anchor_time","gt","pred","len_gt","len_pred","token_f1","seqmatch_sim","char_error_rate"])
+            w.writeheader()
+            for r in rows:
+                w.writerow(r)
+
+    # Also produce a small markdown report of best/worst by token_f1
+    md_path = os.path.join(args.out_dir, f"val_predictions_epoch{epoch_or_step}.md")
+    try:
+        top = sorted(rows, key=lambda x: x["token_f1"], reverse=True)[:5]
+        worst = sorted(rows, key=lambda x: x["token_f1"])[:5]
+        def _fmt(ex):
+            dk = ex.get("date_key")
+            at = ex.get("anchor_time")
+            meta_line = f"(layout={ex.get('layout')}, date_key={dk}, anchor_time={at})"
+            return f"- **GT:** {ex['gt']}\n  \n  **PRED:** {ex['pred']}\n  \n  {meta_line}\n  \n  f1={ex['token_f1']:.3f}, sim={ex['seqmatch_sim']:.3f}, cer={ex['char_error_rate']:.3f}\n"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(f"# Validation Predictions (epoch {epoch_or_step})\n\n")
+            f.write(f"Logged {len(rows)} samples.  \n\n")
+            f.write("## Top matches\n\n" + "\n".join(_fmt(x) for x in top) + "\n\n")
+            f.write("## Worst matches\n\n" + "\n".join(_fmt(x) for x in worst) + "\n")
+    except Exception as e:
+        print(f"[report] Warning: failed to create markdown report: {e}")
+
+    # Log to MLflow
+    if use_mlflow and _MLFLOW_AVAILABLE:
+        mlflow.log_metrics(metrics, step=epoch_or_step)
+        try:
+            mlflow.log_artifact(csv_path, artifact_path="eval")
+            if os.path.exists(md_path):
+                mlflow.log_artifact(md_path, artifact_path="eval")
+        except Exception as e:
+            print(f"[MLflow] Warning: failed to log eval artifacts: {e}")
+
+    return metrics
+
+
+def log_runtime_to_mlflow(args, model, prefixer, lm, train_files, val_files, in_chans, d_vis, d_model):
+    if not _MLFLOW_AVAILABLE:
+        return
+    try:
+        mlflow.set_tag("torch_version", torch.__version__)
+        mlflow.set_tag("cuda_available", str(torch.cuda.is_available()))
+        if torch.cuda.is_available():
+            mlflow.set_tag("cuda_device_name", torch.cuda.get_device_name(0))
+            try:
+                free, total = torch.cuda.mem_get_info()
+                mlflow.log_metrics({"gpu_mem_free": free, "gpu_mem_total": total}, step=0)
+            except Exception:
+                pass
+        # bitsandbytes version if present
+        try:
+            import bitsandbytes as bnb  # type: ignore
+            mlflow.set_tag("bitsandbytes", getattr(bnb, "__version__", "unknown"))
+        except Exception:
+            pass
+
+        total_params = count_params(model, trainable_only=False)
+        trainable_params = count_params(model, trainable_only=True)
+        mlflow.log_params({
+            "total_params": total_params,
+            "trainable_params": trainable_params,
+            "lm_trainable_params": count_params(lm, trainable_only=True),
+            "prefixer_params": count_params(prefixer, trainable_only=False),
+        })
+    except Exception as e:
+        print(f"[MLflow] Warning: failed to log runtime info: {e}")
 
 
 # ----------------- main -----------------
@@ -429,27 +675,13 @@ def make_loader(files, variables, window, stride, batch_size, shuffle, time_star
                       collate_fn=lambda b: collate_v2t(b, pad_id=tokenizer.pad_token_id))
 
 
-def evaluate(model: TinyLlamaV2T, loader: DataLoader, device: str) -> float:
-    model.eval()
-    total, count = 0.0, 0
-    with torch.no_grad():
-        for cubes, valids, input_ids in loader:
-            cubes = cubes.to(device, non_blocking=True)
-            valids = valids.to(device, non_blocking=True)
-            input_ids = input_ids.to(device)
-            loss = model(cubes, valids, input_ids)
-            total += float(loss.item()) * cubes.size(0)
-            count += cubes.size(0)
-    return total / max(1, count)
-
-
 def sample_and_decode(model: TinyLlamaV2T, loader: DataLoader, tok: AutoTokenizer, args, device: str, n_samples: int) -> List[str]:
     texts = []
     it = iter(loader)
     with torch.no_grad():
         for _ in range(n_samples):
             try:
-                cubes, valids, _ = next(it)
+                cubes, valids, _ids, _meta = next(it)
             except StopIteration:
                 break
             cubes = cubes[:1].to(device)  # one sample
@@ -463,6 +695,7 @@ def sample_and_decode(model: TinyLlamaV2T, loader: DataLoader, tok: AutoTokenize
             text = tok.decode(gen_ids[0], skip_special_tokens=True)
             texts.append(text)
     return texts
+
 
 def _infer_swin3d_windows_from_ckpt(state_dict) -> tuple[int, int, int] | None:
     """
@@ -505,6 +738,7 @@ def _strip_relpos_keys(sd: dict) -> dict:
         sd.pop(k, None)
     return sd
 
+
 def main():
     args = build_argparser().parse_args()
     torch.manual_seed(args.seed)
@@ -536,7 +770,6 @@ def main():
             bnb_4bit_compute_dtype=torch.bfloat16 if bf16_ok else torch.float16,
         )
         device_map = None
-        # place whole model on a single device if user specified one CUDA device
         if isinstance(args.device, str) and args.device.startswith("cuda"):
             device_map = {"": args.device}
 
@@ -608,7 +841,7 @@ def main():
     print(train_loader)
     in_chans = int(train_loader.dataset.inner.C)  # type: ignore[attr-defined]
 
-    c, v, y = next(iter(train_loader))
+    c, v, y, m = next(iter(train_loader))
     print("sample shapes:", c.shape, v.shape, y.shape)  # expect (B,C,T,H,W), (B,T,H,W), (B,L)
 
     # --- Load MAE checkpoint, infer correct Swin 3D window sizes, then build model accordingly ---
@@ -621,7 +854,6 @@ def main():
     # Infer window size from the checkpoint
     ws = _infer_swin3d_windows_from_ckpt(ckpt)
     if ws is None:
-        # Sensible default that matches many SatSwinMAE trainings (and matches your error message shapes)
         ws = (2, 8, 8)
     print(f"[SatSwinMAE] Using window_size={ws} (inferred from checkpoint)")
 
@@ -636,7 +868,7 @@ def main():
         missing, unexpected = mae.load_state_dict(ckpt, strict=False)
     except RuntimeError as e:
         print(f"[SatSwinMAE] load_state_dict encountered mismatch: {e}\n"
-            f"[SatSwinMAE] Retrying after stripping relative-position keys ...")
+              f"[SatSwinMAE] Retrying after stripping relative-position keys ...")
         ckpt2 = _strip_relpos_keys(ckpt)
         missing, unexpected = mae.load_state_dict(ckpt2, strict=False)
 
@@ -703,9 +935,12 @@ def main():
             "lora_target_modules": ",".join(args.lora_target_modules),
             "bnb_4bit_quant_type": args.bnb_4bit_quant_type,
             "bnb_double_quant": args.bnb_double_quant,
-            "grad_checkpointing": args.grad_checkpointing
+            "grad_checkpointing": args.grad_checkpointing,
+            "log_val_samples": args.log_val_samples,
+            "max_eval_batches": args.max_eval_batches,
+            "batch_log_freq": args.batch_log_freq,  # NEW
         })
-        # dataset info
+        # dataset / runtime info
         mlflow.log_params({
             "train_files_count": len(train_files),
             "val_files_count": len(val_files),
@@ -715,16 +950,33 @@ def main():
             "d_vis": d_vis,
             "d_model": d_model
         })
+        log_runtime_to_mlflow(args, model, prefixer, lm, train_files, val_files, in_chans, d_vis, d_model)
+
+    # If test-only, run a single eval + GT/pred logging and exit
+    if args.test_only:
+        print("[test_only] Running validation evaluation with GT/pred logging ...")
+        val_loss = evaluate_loss(model, val_loader, args.device)
+        ppl = math.exp(val_loss) if val_loss < 50 else float("inf")
+        print(f"[eval] loss={val_loss:.4f}  ppl={ppl:.2f}")
+        if use_mlflow:
+            mlflow.log_metrics({"val_loss": val_loss, "val_ppl": ppl}, step=0)
+        _ = eval_and_log_predictions(model, val_loader, tok, args, args.device, epoch_or_step=0, use_mlflow=use_mlflow)
+        if use_mlflow:
+            mlflow.end_run()
+        return
 
     # ------------- Training loop -------------
     best_val = float("inf")
+    global_step = 0  # <-- NEW global step for per-batch MLflow logging
     for epoch in range(1, args.epochs + 1):
         model.train()
         running = 0.0
         count_batches = 0
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}", leave=False)
-        for cubes, valids, input_ids in pbar:
+        for batch_idx, (cubes, valids, input_ids, _meta) in enumerate(pbar, start=1):
+            start_t = time.perf_counter()  # <-- NEW: batch timer
+
             cubes = cubes.to(args.device, non_blocking=True)
             valids = valids.to(args.device, non_blocking=True)
             input_ids = input_ids.to(args.device)
@@ -732,12 +984,30 @@ def main():
             loss = model(cubes, valids, input_ids)
             opt.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(params, 1.0)
+            grad_norm = nn.utils.clip_grad_norm_(params, 1.0)  # <-- capture grad-norm
             opt.step()
+
+            elapsed = time.perf_counter() - start_t  # <-- NEW
+            throughput = (cubes.size(0) / elapsed) if elapsed > 0 else 0.0  # samples/sec
 
             running += float(loss.item())
             count_batches += 1
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            global_step += 1
+
+            # tqdm live info
+            pbar.set_postfix(loss=f"{loss.item():.4f}", t_s=f"{elapsed:.2f}", ips=f"{throughput:.1f}")
+
+            # MLflow per-batch metrics
+            if use_mlflow and (global_step % max(1, args.batch_log_freq) == 0):
+                try:
+                    mlflow.log_metrics({
+                        "train_batch_loss": float(loss.item()),
+                        "train_batch_time_sec": float(elapsed),
+                        "train_batch_throughput": float(throughput),
+                        "train_batch_grad_norm": float(grad_norm)
+                    }, step=global_step)
+                except Exception as e:
+                    print(f"[MLflow] Warning: batch metric log failed: {e}")
 
         avg_train = running / max(1, count_batches)
         print(f"Epoch {epoch}/{args.epochs}  train_loss={avg_train:.4f}")
@@ -768,21 +1038,24 @@ def main():
         # ---------- EVAL ----------
         do_eval = (args.eval_every > 0 and (epoch % args.eval_every == 0)) or (epoch == args.epochs)
         if do_eval:
-            val_loss = evaluate(model, val_loader, args.device)
-            print(f"[eval] epoch={epoch}  val_loss={val_loss:.4f}")
+            val_loss = evaluate_loss(model, val_loader, args.device)
+            ppl = math.exp(val_loss) if val_loss < 50 else float("inf")
+            print(f"[eval] epoch={epoch}  val_loss={val_loss:.4f}  ppl={ppl:.2f}")
 
             # Track best
             best_val = min(best_val, val_loss)
 
             if use_mlflow:
                 mlflow.log_metric("val_loss", val_loss, step=epoch)
+                mlflow.log_metric("val_ppl", ppl, step=epoch)
                 mlflow.log_metric("best_val_loss", best_val, step=epoch)
 
+                # GT vs Pred pairs + metrics
+                _ = eval_and_log_predictions(model, val_loader, tok, args, args.device, epoch_or_step=epoch, use_mlflow=use_mlflow)
                 # Sample generations
                 if args.gen_samples > 0:
                     try:
                         gens = sample_and_decode(model, val_loader, tok, args, args.device, args.gen_samples)
-                        # Log as a single text artifact
                         text_blob = "\n\n".join([f"### Sample {i+1}\n{t}" for i, t in enumerate(gens)])
                         mlflow.log_text(text_blob, artifact_file=f"samples/epoch_{epoch}.md")
                     except Exception as e:

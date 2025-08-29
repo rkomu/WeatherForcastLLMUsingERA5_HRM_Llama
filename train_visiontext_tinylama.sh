@@ -27,12 +27,12 @@ python -m vision_text.train_tinyllama_vision2text \
   \
   --mae_ckpt checkpoints/satswinmae_epoch59.pt \
   --model_name TinyLlama/TinyLlama_v1.1 \
-  --batch_size 32 --epochs 10 --lr 1e-4 \
+  --batch_size 32 --epochs 100 --lr 0.0001 \
   --n_latents 32 --adapter_layers 2 --adapter_heads 8 \
   \
-  --eval_every 2 --gen_samples 3 --gen_max_new_tokens 64 \
+  --eval_every 1 --gen_samples 3 --gen_max_new_tokens 128 \
   \
   --mlflow_experiment_name tinyllama_vision2text \
   --mlflow_run_name aug2024_adapter \
-  --split_mode random
-  # --mlflow_tags mae_window=2x8x8 vars=7 in_chans=17
+  --split_mode random \
+  --use_qlora --lora_r 16 --lora_alpha 32 --lora_dropout 0.1 \
