@@ -1,68 +1,6 @@
 
-# WeatherLM: Vision-to-Text Weather Narratives from ERA5 usi**High-level answer:** Freeze a strong **3D masked autoencoder** for vision (### 6.1 Wh### 6.2 Why "soft prompts" (pr- **Inductive bias**: the heavy lifting (spatiotemporal abstraction) is alre## 12) Diagnostics & Tips
+# WeatherLM: Vision-to-Text Weather Narratives from ERA5 using SatSwinMAE + HRM
 
-- If loss ≈ 10.8 and flat: verify labels ignore prompts, adapter params in the optimizer, no `.detach()` on prompts, no `no_grad` wrapping the language model forward with embeds.  
-- If "No windows": widen time or lower `window_T` (≥ `patch_t`).  
-- Channel mismatch vs ckpt: ensure dataset variables/levels sum to the encoder's expected `in_chans`.  
-- Keep `LM.seq_len ≥ M + max_caption_len`.ne by SatSwinMAE. The adapter's job is **affine re-embedding** with mild nonlinearity into the language model's space.
-- **Latency/VRAM**: smaller = faster and leaves budget for longer contexts if needed.x) and not cross-attention?
-- **Parameter & data efficiency**: a prefixer adds **tiny** parameter count; cross-attn adds full Q/K/V projections and blocks that are harder to train with limited captions.
-- **Architectural simplicity**: no surgery inside the language model; works with *any* LM that exposes `inputs_embeds`.
-- **Stability**: prefix-tuning is well-behaved with frozen LMs; gradients flow through the LM to the **inputs**, teaching the adapter alignment "vision → words" without destabilizing the LM.
-- **Sequence control**: the number of soft tokens **M** is explicit; we can budget the LM's `seq_len` (`seq_len ≥ M + max_caption_len`). does
-- Input: `z ∈ ℝ^{B×M×Dv}` (M selected/pooled vision tokens).
-- MLP: `Dv → dH` with **SiLU or GELU** activations, typically 2–4 layers, optional residual/LayerScale.
-- Output: `P ∈ ℝ^{B×M×dH}` — **soft prompt tokens** in the **same space** as the language model's word embeddings.
-- Concatenate with text embeddings: `X = [P | E_y]`, then run the language model with `inputs_embeds`.inMAE) and a reasoning-oriented **language model** (HRM-ACTv1 or TinyLlama-1.1B). Train only a small **Vision→Text adapter** that maps visual latents to **soft text prompts** consumed by the language model. This preserves each backbone's strength and avoids catastrophic forgetting.g SatSwinMAE + HRM/TinyLlama
-
-> ****Why HRM (vs a generic LM)**: weather narratives often benefit from **iterative** reasoning ("if low deepens then…"). HRM's H/L cycles and ACT provide a natural mechanism for this, even when frozen—the adapter learns to place prompts that guide these steps.
-
----
-
-## 5.1) TinyLlama-1.1B (Alternative Language Backbone) — What & Why
-
-As an alternative to HRM-ACTv1, we also support **TinyLlama-1.1B** as the language backbone, particularly useful for faster experimentation and resource-constrained environments.
-
-### 5.1.1 Architecture
-- **Base model**: TinyLlama/TinyLlama_v1.1 (1.1B parameters)
-- **Architecture**: Transformer decoder with **RMSNorm**, **SwiGLU** MLPs, **RoPE** positional encoding
-- **Vocabulary**: ~32K tokens optimized for general text generation
-- **Context length**: 2048 tokens (sufficient for weather captions)
-
-### 5.1.2 Integration with Vision
-- **Frozen backbone**: TinyLlama weights remain frozen during vision-text training
-- **Soft prompt injection**: Vision adapter outputs are prepended as `inputs_embeds` to the language model
-- **QLoRA support**: Optional 4-bit quantization with LoRA adapters for memory efficiency
-
-### 5.1.3 Training Efficiency Features
-- **QLoRA (Quantized LoRA)**: 4-bit quantization reduces memory footprint by ~75%
-- **LoRA adapters**: Low-rank adaptation on attention and MLP layers (typical: `r=16`, `α=32`)
-- **Target modules**: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
-- **Gradient checkpointing**: Reduces memory usage during backpropagation
-
-### 5.1.4 Why TinyLlama (vs HRM)?
-- **Faster iteration**: Smaller model = faster training and inference for prototyping
-- **Lower resource requirements**: ~1.1B vs larger HRM variants; works on single consumer GPUs
-- **Pretrained language priors**: Benefits from extensive text pretraining on diverse corpora
-- **Production ready**: Well-tested transformer architecture with robust tokenization
-- **Compatibility**: Standard HuggingFace interface for easy integration with existing tools
-
-### 5.1.5 When to use TinyLlama vs HRM
-- **TinyLlama**: 
-  - Rapid prototyping and experimentation
-  - Resource-constrained environments (single GPU, limited VRAM)
-  - Baseline comparisons and ablation studies
-  - Production deployments prioritizing speed over sophisticated reasoning
-- **HRM**: 
-  - Complex weather reasoning requiring iterative refinement
-  - Applications needing adaptive computation and variable inference steps
-  - Research into hierarchical reasoning mechanisms
-
----
-
-## 6) Vision→Text Adapter (Prefixer) — What, How, and **Why**** — This README explains the **technical design and rationale** for the model. It focuses on *what the pieces are*, *how they fit*, and *why we chose them*. (Setup/installation is intentionally omitted here.)
-
----
 
 ## 1) Problem Statement & Design Goals
 
