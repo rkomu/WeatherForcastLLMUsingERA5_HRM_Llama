@@ -5,7 +5,6 @@
 - If "No windows": widen time or lower `window_T` (≥ `patch_t`).  
 - Channel mismatch vs ckpt: ensure dataset variables/levels sum to the encoder's expected `in_chans`.  
 - Keep `LM.seq_len ≥ M + max_caption_len`.ne by SatSwinMAE. The adapter's job is **affine re-embedding** with mild nonlinearity into the language model's space.
-- **Overfitting risk**: with limited captions, a large adapter would overfit quickly.  
 - **Latency/VRAM**: smaller = faster and leaves budget for longer contexts if needed.x) and not cross-attention?
 - **Parameter & data efficiency**: a prefixer adds **tiny** parameter count; cross-attn adds full Q/K/V projections and blocks that are harder to train with limited captions.
 - **Architectural simplicity**: no surgery inside the language model; works with *any* LM that exposes `inputs_embeds`.
