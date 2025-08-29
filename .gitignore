@@ -12,3 +12,6 @@ wheels/
 *.nc
 *.pt 
 mlruns/
+
+checkpoints/
+checkpoints_v2t/
