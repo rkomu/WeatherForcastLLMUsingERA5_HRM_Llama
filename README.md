@@ -1,7 +1,67 @@
 
-# WeatherLM: Vision-to-Text Weather Narratives from ERA5 using SatSwinMAE + HRM
+# WeatherLM: Vision-to-Text Weather Narratives from ERA5 usi**High-level answer:** Freeze a strong **3D masked autoencoder** for vision (### 6.1 Wh### 6.2 Why "soft prompts" (pr- **Inductive bias**: the heavy lifting (spatiotemporal abstraction) is alre## 12) Diagnostics & Tips
 
-> **Scope** — This README explains the **technical design and rationale** for the model. It focuses on *what the pieces are*, *how they fit*, and *why we chose them*. (Setup/installation is intentionally omitted here.)
+- If loss ≈ 10.8 and flat: verify labels ignore prompts, adapter params in the optimizer, no `.detach()` on prompts, no `no_grad` wrapping the language model forward with embeds.  
+- If "No windows": widen time or lower `window_T` (≥ `patch_t`).  
+- Channel mismatch vs ckpt: ensure dataset variables/levels sum to the encoder's expected `in_chans`.  
+- Keep `LM.seq_len ≥ M + max_caption_len`.ne by SatSwinMAE. The adapter's job is **affine re-embedding** with mild nonlinearity into the language model's space.
+- **Overfitting risk**: with limited captions, a large adapter would overfit quickly.  
+- **Latency/VRAM**: smaller = faster and leaves budget for longer contexts if needed.x) and not cross-attention?
+- **Parameter & data efficiency**: a prefixer adds **tiny** parameter count; cross-attn adds full Q/K/V projections and blocks that are harder to train with limited captions.
+- **Architectural simplicity**: no surgery inside the language model; works with *any* LM that exposes `inputs_embeds`.
+- **Stability**: prefix-tuning is well-behaved with frozen LMs; gradients flow through the LM to the **inputs**, teaching the adapter alignment "vision → words" without destabilizing the LM.
+- **Sequence control**: the number of soft tokens **M** is explicit; we can budget the LM's `seq_len` (`seq_len ≥ M + max_caption_len`). does
+- Input: `z ∈ ℝ^{B×M×Dv}` (M selected/pooled vision tokens).
+- MLP: `Dv → dH` with **SiLU or GELU** activations, typically 2–4 layers, optional residual/LayerScale.
+- Output: `P ∈ ℝ^{B×M×dH}` — **soft prompt tokens** in the **same space** as the language model's word embeddings.
+- Concatenate with text embeddings: `X = [P | E_y]`, then run the language model with `inputs_embeds`.inMAE) and a reasoning-oriented **language model** (HRM-ACTv1 or TinyLlama-1.1B). Train only a small **Vision→Text adapter** that maps visual latents to **soft text prompts** consumed by the language model. This preserves each backbone's strength and avoids catastrophic forgetting.g SatSwinMAE + HRM/TinyLlama
+
+> ****Why HRM (vs a generic LM)**: weather narratives often benefit from **iterative** reasoning ("if low deepens then…"). HRM's H/L cycles and ACT provide a natural mechanism for this, even when frozen—the adapter learns to place prompts that guide these steps.
+
+---
+
+## 5.1) TinyLlama-1.1B (Alternative Language Backbone) — What & Why
+
+As an alternative to HRM-ACTv1, we also support **TinyLlama-1.1B** as the language backbone, particularly useful for faster experimentation and resource-constrained environments.
+
+### 5.1.1 Architecture
+- **Base model**: TinyLlama/TinyLlama_v1.1 (1.1B parameters)
+- **Architecture**: Transformer decoder with **RMSNorm**, **SwiGLU** MLPs, **RoPE** positional encoding
+- **Vocabulary**: ~32K tokens optimized for general text generation
+- **Context length**: 2048 tokens (sufficient for weather captions)
+
+### 5.1.2 Integration with Vision
+- **Frozen backbone**: TinyLlama weights remain frozen during vision-text training
+- **Soft prompt injection**: Vision adapter outputs are prepended as `inputs_embeds` to the language model
+- **QLoRA support**: Optional 4-bit quantization with LoRA adapters for memory efficiency
+
+### 5.1.3 Training Efficiency Features
+- **QLoRA (Quantized LoRA)**: 4-bit quantization reduces memory footprint by ~75%
+- **LoRA adapters**: Low-rank adaptation on attention and MLP layers (typical: `r=16`, `α=32`)
+- **Target modules**: `q_proj`, `k_proj`, `v_proj`, `o_proj`, `gate_proj`, `up_proj`, `down_proj`
+- **Gradient checkpointing**: Reduces memory usage during backpropagation
+
+### 5.1.4 Why TinyLlama (vs HRM)?
+- **Faster iteration**: Smaller model = faster training and inference for prototyping
+- **Lower resource requirements**: ~1.1B vs larger HRM variants; works on single consumer GPUs
+- **Pretrained language priors**: Benefits from extensive text pretraining on diverse corpora
+- **Production ready**: Well-tested transformer architecture with robust tokenization
+- **Compatibility**: Standard HuggingFace interface for easy integration with existing tools
+
+### 5.1.5 When to use TinyLlama vs HRM
+- **TinyLlama**: 
+  - Rapid prototyping and experimentation
+  - Resource-constrained environments (single GPU, limited VRAM)
+  - Baseline comparisons and ablation studies
+  - Production deployments prioritizing speed over sophisticated reasoning
+- **HRM**: 
+  - Complex weather reasoning requiring iterative refinement
+  - Applications needing adaptive computation and variable inference steps
+  - Research into hierarchical reasoning mechanisms
+
+---
+
+## 6) Vision→Text Adapter (Prefixer) — What, How, and **Why**** — This README explains the **technical design and rationale** for the model. It focuses on *what the pieces are*, *how they fit*, and *why we chose them*. (Setup/installation is intentionally omitted here.)
 
 ---
 
@@ -25,14 +85,15 @@ ERA5 windows (C × T × H × W)
           │
     SatSwinMAE encoder (frozen) ──► z: B × M× Dv   (visual latents)
           │
- Vision→Text Adapter (trainable) ──► P: B × M× dH  (soft prompts in HRM space)
+ Vision→Text Adapter (trainable) ──► P: B × M× dH  (soft prompts in LM space)
           │
-      HRM-ACTv1 (frozen LM) ───────► logits over vocab → text
+      Language Model (frozen) ─────────► logits over vocab → text
+      [HRM-ACTv1 or TinyLlama-1.1B]
 ```
 
 - **SatSwinMAE** — 3D Swin Transformer + MAE pretraining to learn generic spatiotemporal structure.
-- **Adapter** — small MLP mapping vision latent dim **Dv** → HRM embed dim **dH**; outputs **M** soft prefix tokens.
-- **HRM-ACTv1** — hierarchical reasoning LM; consumes `inputs_embeds` (prefix + word embeddings) and emits token logits.
+- **Adapter** — small MLP mapping vision latent dim **Dv** → LM embed dim **dH**; outputs **M** soft prefix tokens.
+- **Language Model** — frozen LM (HRM-ACTv1 or TinyLlama-1.1B); consumes `inputs_embeds` (prefix + word embeddings) and emits token logits.
 
 **Why this separation?**  
 Self-supervised **vision pretraining** scales cheaply; **LM priors** handle discourse. **Adapter-only** training is stable and sample-efficient.
@@ -128,7 +189,7 @@ We choose **smooth, non-linear activations** that are known to work well in Tran
 
 ### 6.5 How we pick **M** (number of prompt tokens)
 - Start with **M = 32**; try 16/64 in ablations.  
-- Ensure `HRM.seq_len ≥ M + max_caption_len`.  
+- Ensure `LM.seq_len ≥ M + max_caption_len`.  
 - Increasing **M** helps detail recall up to a point; too large → longer sequences with diminishing returns.
 
 ### 6.6 Pooling/selection from the vision grid to M tokens — Why & options
@@ -138,20 +199,20 @@ We often have many encoder tokens (`T'·H'·W'`). We reduce to **M** to keep HRM
 - **Attention pooling** with a few learned queries — focuses on salient synoptic structures.  
 - **Strided subsampling** — simplest path if token grid is already dense.
 
-**Why reduce?** HRM sequence budget is precious. Pooling summarizes redundant local patterns (e.g., broad stratiform cloud decks) without losing essential synoptic cues (lows, fronts, jets).
+**Why reduce?** Language model sequence budget is precious. Pooling summarizes redundant local patterns (e.g., broad stratiform cloud decks) without losing essential synoptic cues (lows, fronts, jets).
 
 ---
 
 ## 7) Training: What Learns & Why It Works
 
-- **Frozen**: SatSwinMAE, HRM weights.  
+- **Frozen**: SatSwinMAE, Language Model weights.  
 - **Trainable**: the adapter MLP (and optionally pooling params).
 
-**Mechanism**: next-token **cross-entropy** on caption tokens. The loss backpropagates **through the frozen HRM** to the **adapter outputs** (prompts). The adapter learns to place the right vectors so HRM emits the desired words.
+**Mechanism**: next-token **cross-entropy** on caption tokens. The loss backpropagates **through the frozen language model** to the **adapter outputs** (prompts). The adapter learns to place the right vectors so the LM emits the desired words.
 
 **Loss baseline**: with a GPT‑2 tokenizer `V≈50k`, a uniform-guess CE ≈ `ln(V) ≈ 10.8` nats. Early loss around 10–11 is normal and quickly drops if the wiring is correct.
 
-**When to unfreeze**: if generations stay generic, unfreeze the **last HRM block** (or add **LoRA**) with a tiny LR (e.g., `1e‑5`) to better bind phrasing to visual cues.
+**When to unfreeze**: if generations stay generic, unfreeze the **last LM block** (or add **LoRA** for TinyLlama) with a tiny LR (e.g., `1e‑5`) to better bind phrasing to visual cues.
 
 ---
 
@@ -171,7 +232,7 @@ Key controls: `--date`, `--anchor`, `--time_start/--time_end`, `--window_*`, `--
 - Encoder yields `z_grid ∈ ℝ^{B×(T'·H'·W')×Dv}` → pooled to `z ∈ ℝ^{B×M×Dv}`.  
 - Adapter `A: ℝ^{Dv}→ℝ^{dH}` → `P = A(z) ∈ ℝ^{B×M×dH}`.  
 - Text embeddings `E_y ∈ ℝ^{B×L×dH}`. Inputs: `X = [P | E_y]`.  
-- HRM `F(X) → logits ∈ ℝ^{B×(M+L)×V}`.  
+- Language Model `F(X) → logits ∈ ℝ^{B×(M+L)×V}`.  
 - Labels ignore prompts/pad (`-100`). Loss `CE(logits, labels)` updates **A** only.
 
 ---
@@ -212,12 +273,12 @@ with torch.no_grad():
     z = mae.encode_tokens(cubes)            # (B, M, Dv)
 
 prompts = adapter(z)                        # (B, M, dH)
-E_y = hrm.embed_tokens(input_ids)           # (B, L, dH)
+E_y = lm.embed_tokens(input_ids)            # (B, L, dH)
 
 X = torch.cat([prompts, E_y], dim=1)        # (B, M+L, dH)
 mask = torch.cat([torch.ones(B, M, device=X.device), text_attn], dim=1)
 
-logits = hrm.forward_with_embeds(X, attention_mask=mask)  # (B, M+L, V)
+logits = lm.forward_with_embeds(X, attention_mask=mask)  # (B, M+L, V)
 
 labels = torch.full((B, M+L), -100, device=X.device, dtype=torch.long)
 labels[:, M:] = input_ids.masked_fill(~text_attn.bool(), -100)
@@ -232,8 +293,68 @@ loss.backward(); opt.step()
 
 - `sat_swin_mae/` — encoder, patch/embed, MAE training.  
 - `models/hrm/` — HRM-ACTv1 (hierarchical LM), layers (SDPA attention).  
-- `vision_text/` — adapter training and date‑driven inference.  
+- `vision_text/` — adapter training and date‑driven inference (both HRM and TinyLlama versions).
+  - `train_hrm_vision2text.py` — HRM-based vision-to-text training
+  - `train_tinyllama_vision2text.py` — TinyLlama-based vision-to-text training with QLoRA support
+  - `infer_tinyllama_vision2text.py` — TinyLlama inference script
 - `dataset_*` — ERA5 & caption datasets (multi‑caption per date).
+- `checkpoints_v2t/` — trained adapter checkpoints and LoRA adapters.
+
+---
+
+## 15) Training Scripts & Usage
+
+### 15.1 TinyLlama Vision-to-Text Training
+
+Basic training with TinyLlama:
+```bash
+python -m vision_text.train_tinyllama_vision2text \
+  --files "dataset/raw_data/nc_*/*.nc" \
+  --variables u10 v10 r sp ssrd t cp \
+  --window_T 8 --window_H 64 --window_W 64 \
+  --stride_T 4 --stride_H 32 --stride_W 32 \
+  --mae_ckpt checkpoints/satswinmae_epoch59.pt \
+  --caption_csv dataset/weather/weather_jan_may_2024.csv \
+  --caption_date_col date --caption_text_col "event description" \
+  --drop_if_no_caption --anchor last \
+  --batch_size 32 --epochs 100 --lr 0.0001 \
+  --n_latents 32 --adapter_layers 2 --adapter_heads 8
+```
+
+With QLoRA (memory efficient):
+```bash
+python -m vision_text.train_tinyllama_vision2text \
+  --files "dataset/raw_data/nc_*/*.nc" \
+  --variables u10 v10 r sp ssrd t cp \
+  --mae_ckpt checkpoints/satswinmae_epoch59.pt \
+  --caption_csv dataset/weather/weather_jan_may_2024.csv \
+  --use_qlora --lora_r 16 --lora_alpha 32 --lora_dropout 0.1 \
+  --batch_size 16 --epochs 50 --lr 0.0001
+```
+
+### 15.2 TinyLlama Inference
+
+Generate captions for a specific date:
+```bash
+python infer_tinyllama_vision2text.py \
+  --files "dataset/raw_data/nc_*/*.nc" \
+  --variables u10 v10 r sp ssrd t cp \
+  --date 2024-03-15 \
+  --mae_ckpt checkpoints/satswinmae_epoch59.pt \
+  --adapter_ckpt checkpoints_v2t/tinyllama_adapter_final.pt \
+  --max_new_tokens 128 --temperature 0.7
+```
+
+### 15.3 HRM Vision-to-Text Training
+
+```bash
+python -m vision_text.train_hrm_vision2text \
+  --files "dataset/raw_data/nc_*/*.nc" \
+  --variables t2m sp \
+  --mae_ckpt checkpoints/satswinmae_epoch10.pt \
+  --caption_csv dataset/weather/weather_august_2024.csv \
+  --epochs 10 --batch_size 4 --lr 1e-4
+```
 
 ---
 
