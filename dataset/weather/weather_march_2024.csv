@@ -1,188 +1,32 @@
-
-date,event description
-2024-03-01,Torrential rain (~40 mm) over Southeast Asia as storms soaked the region
-2024-03-01,Light rain (~10 mm) in West Africa during the early rainy season
-2024-03-01,Blizzard conditions with snow depths around 300 cm and winds up to 190 mph in Western North America
-2024-03-01,Showers (~30 mm) moved across the East of South America
-2024-03-01,Moderate rain (~20 mm) fell over Northern Europe
-2024-03-01,Light rainfall (~20 mm) occurred over Southern Australia
-2024-03-02,Torrential rain (~60 mm) over Southeast Asia as storms soaked the region
-2024-03-02,Light rain (~15 mm) in West Africa during the early rainy season
-2024-03-02,Snowstorm deposited about 50 cm of snow across Western North America mountains
-2024-03-02,Moderate to heavy rain (~58.4 mm) fell over the East of South America
-2024-03-02,Moderate rain (~30 mm) fell over Northern Europe
-2024-03-02,Light rainfall (~25 mm) occurred over Southern Australia
-2024-03-03,Torrential rain (~80 mm) over Southeast Asia as storms soaked the region
-2024-03-03,Light rain (~5 mm) in West Africa during the early rainy season
-2024-03-03,Snowstorm deposited about 60 cm of snow across Western North America mountains
-2024-03-03,Showers (~40 mm) moved across the East of South America
-2024-03-03,Moderate rain (~25 mm) fell over Northern Europe
-2024-03-03,Light rainfall (~30 mm) occurred over Southern Australia
-2024-03-04,Torrential rain (~100 mm) over Southeast Asia as storms soaked the region
-2024-03-04,Light rain (~8 mm) in West Africa during the early rainy season
-2024-03-04,Light precipitation (~5 mm) in Central North America under calm weather
-2024-03-04,Moderate to heavy rain (~50 mm) fell over the East of South America
-2024-03-04,Moderate rain (~35 mm) fell over Northern Europe
-2024-03-04,Light rainfall (~35 mm) occurred over Southern Australia
-2024-03-05,Torrential rain (~150 mm) over Southeast Asia as storms soaked the region
-2024-03-05,Light rain (~12 mm) in West Africa during the early rainy season
-2024-03-05,Light precipitation (~10 mm) in Central North America under calm weather
-2024-03-05,Moderate to heavy rain (~60 mm) fell over the East of South America
-2024-03-05,Extremely heavy rainfall (~100 mm) drenched Southern Europe during a strong storm
-2024-03-05,Light rainfall (~40 mm) occurred over Southern Australia
-2024-03-06,Torrential rain (~200 mm) over Southeast Asia as storms soaked the region
-2024-03-06,Scattered showers (~20 mm) across Southern Africa
-2024-03-06,Light precipitation (~8 mm) in Central North America under calm weather
-2024-03-06,Heavy rainfall (~80 mm) affected the East of South America as storms persisted
-2024-03-06,Extremely heavy rainfall (~150 mm) drenched Southern Europe during a strong storm
-2024-03-06,Moderate rainfall (~50 mm) affected Southern Australia
-2024-03-07,Torrential rain (~300 mm) over Southeast Asia as storms soaked the region
-2024-03-07,Scattered showers (~25 mm) across Southern Africa
-2024-03-07,Spring showers (~12 mm) across Eastern North America
-2024-03-07,Heavy rainfall (~90 mm) affected the East of South America as storms persisted
-2024-03-07,Extremely heavy rainfall (~200 mm) drenched Southern Europe during a strong storm
-2024-03-07,Moderate rainfall (~60 mm) affected Southern Australia
-2024-03-08,Torrential rain (~250 mm) over Southeast Asia as storms soaked the region
-2024-03-08,Scattered showers (~30 mm) across Southern Africa
-2024-03-08,Spring showers (~15 mm) across Eastern North America
-2024-03-08,Heavy rainfall (~100 mm) affected the East of South America as storms persisted
-2024-03-08,Extremely heavy rainfall (~150 mm) drenched Southern Europe during a strong storm
-2024-03-08,Moderate rainfall (~70 mm) affected Southern Australia
-2024-03-09,Torrential rain (~200 mm) over Southeast Asia as storms soaked the region
-2024-03-09,Scattered showers (~18 mm) across Southern Africa
-2024-03-09,Spring showers (~20 mm) across Eastern North America
-2024-03-09,Heavy rainfall (~110 mm) affected the East of South America as storms persisted
-2024-03-09,Extremely heavy rainfall (~120 mm) drenched Southern Europe during a strong storm
-2024-03-09,Moderate rainfall (~80 mm) affected Southern Australia
-2024-03-10,Torrential rain (~150 mm) over Southeast Asia as storms soaked the region
-2024-03-10,Scattered showers (~22 mm) across Southern Africa
-2024-03-10,Spring showers (~25 mm) across Eastern North America
-2024-03-10,Torrential rain (~120 mm) soaked the East of South America during stormy conditions
-2024-03-10,Heavy rain (~80 mm) impacted Southern Europe
-2024-03-10,Heavy rain (~100 mm) fell across Southern Australia
-2024-03-11,Rain showers (~30 mm) in Central Asia under wetter-than-average conditions
-2024-03-11,Intense heatwave with temperatures reaching ~41°C in East Africa
-2024-03-11,Severe thunderstorms brought hail up to 3 cm diameter to Midwestern North America
-2024-03-11,Torrential rain (~125 mm) soaked the East of South America during stormy conditions
-2024-03-11,Moderate rain (~30 mm) fell over Western Europe
-2024-03-11,Heavy rain (~120 mm) fell across Northern Australia
-2024-03-12,Rain showers (~25 mm) in Central Asia under wetter-than-average conditions
-2024-03-12,Intense heatwave with temperatures reaching ~42°C in East Africa
-2024-03-12,Severe thunderstorms brought rainfall of 40 mm and hail to Midwestern North America
-2024-03-12,Torrential rain (~130 mm) soaked the East of South America during stormy conditions
-2024-03-12,Moderate rain (~25 mm) fell over Western Europe
-2024-03-12,Heavy rain (~150 mm) fell across Northern Australia
-2024-03-13,Rain showers (~35 mm) in Central Asia under wetter-than-average conditions
-2024-03-13,Intense heatwave with temperatures reaching ~43°C in East Africa
-2024-03-13,Severe thunderstorms brought thunderstorms with 50 mm of rain to Midwestern North America
-2024-03-13,Torrential rain (~135 mm) soaked the East of South America during stormy conditions
-2024-03-13,Moderate rain (~20 mm) fell over Western Europe
-2024-03-13,Heavy rain (~180 mm) fell across Northern Australia
-2024-03-14,Rain showers (~40 mm) in Central Asia under wetter-than-average conditions
-2024-03-14,Intense heatwave with temperatures reaching ~44°C in East Africa
-2024-03-14,Severe thunderstorms brought severe storms with 60 mm of rain and multiple tornadoes to Midwestern North America
-2024-03-14,Torrential rain (~140 mm) soaked the East of South America during stormy conditions
-2024-03-14,Light showers (~15 mm) moved across Western Europe
-2024-03-14,Very heavy rain (~200 mm) impacted Northern Australia with monsoonal storms
-2024-03-15,Rain showers (~45 mm) in Central Asia under wetter-than-average conditions
-2024-03-15,Intense heatwave with temperatures reaching ~45°C in East Africa
-2024-03-15,Severe thunderstorms brought intense storms producing 70 mm of rain and large hail to Midwestern North America
-2024-03-15,Torrential rain (~145 mm) soaked the East of South America during stormy conditions
-2024-03-15,Light showers (~10 mm) moved across Western Europe
-2024-03-15,Very heavy rain (~220 mm) impacted Northern Australia with monsoonal storms
-2024-03-16,Rain showers (~50 mm) in Central Asia under wetter-than-average conditions
-2024-03-16,Intense heatwave with temperatures reaching ~41°C in East Africa
-2024-03-16,Late-season snowstorm dropped about 20 inches of snow across interior Northern North America
-2024-03-16,Torrential rain (~150 mm) soaked the East of South America during stormy conditions
-2024-03-16,Scattered drizzle (~5 mm) occurred in Eastern Europe
-2024-03-16,Very heavy rain (~240 mm) impacted Northern Australia with monsoonal storms
-2024-03-17,Rain showers (~55 mm) in Central Asia under wetter-than-average conditions
-2024-03-17,Intense heatwave with temperatures reaching ~42°C in East Africa
-2024-03-17,Late-season snowstorm dropped about 25 inches of snow across interior Northern North America
-2024-03-17,Torrential rain (~154 mm) soaked the East of South America during stormy conditions
-2024-03-17,Light showers (~10 mm) moved across Eastern Europe
-2024-03-17,Exceptional rainfall (~260 mm) inundated Northern Australia as a tropical low passed
-2024-03-18,Rain showers (~60 mm) in Central Asia under wetter-than-average conditions
-2024-03-18,Intense heatwave with temperatures reaching ~43°C in East Africa
-2024-03-18,Late-season snowstorm dropped about 30 inches of snow across interior Northern North America
-2024-03-18,Torrential rain (~140 mm) soaked the East of South America during stormy conditions
-2024-03-18,Light showers (~15 mm) moved across Eastern Europe
-2024-03-18,Exceptional rainfall (~300 mm) inundated Northern Australia as a tropical low passed
-2024-03-19,Rain showers (~65 mm) in Central Asia under wetter-than-average conditions
-2024-03-19,Intense heatwave with temperatures reaching ~44°C in East Africa
-2024-03-19,Late-season snowstorm dropped about 35 inches of snow across interior Northern North America
-2024-03-19,Torrential rain (~138 mm) soaked the East of South America during stormy conditions
-2024-03-19,Moderate rain (~20 mm) fell over Eastern Europe
-2024-03-19,Exceptional rainfall (~289 mm) inundated Eastern Australia as a tropical low passed
-2024-03-20,Rain showers (~70 mm) in Central Asia under wetter-than-average conditions
-2024-03-20,Intense heatwave with temperatures reaching ~45°C in East Africa
-2024-03-20,Late-season snowstorm dropped about 40 inches of snow across interior Northern North America
-2024-03-20,Torrential rain (~135 mm) soaked the East of South America during stormy conditions
-2024-03-20,Moderate rain (~25 mm) fell over Eastern Europe
-2024-03-20,Very heavy rain (~200 mm) impacted Eastern Australia with monsoonal storms
-2024-03-21,Moderate rainfall (~15 mm) in East Asia amid early spring storms
-2024-03-21,Intense heatwave with temperatures reaching ~43°C in East Africa
-2024-03-21,Showery weather delivered around 15 mm of rain in Southern North America
-2024-03-21,Torrential rain (~120 mm) soaked the East of South America during stormy conditions
-2024-03-21,Moderate rain (~30 mm) fell over Central Europe
-2024-03-21,Heavy rain (~150 mm) fell across Eastern Australia
-2024-03-22,Moderate rainfall (~20 mm) in East Asia amid early spring storms
-2024-03-22,Rainfall of about 25 mm fell over Central Africa during seasonal rains
-2024-03-22,Showery weather delivered around 10 mm of rain in Southern North America
-2024-03-22,Heavy rainfall (~80 mm) affected the East of South America as storms persisted
-2024-03-22,Moderate rain (~20 mm) fell over Central Europe
-2024-03-22,Heavy rain (~120 mm) fell across Eastern Australia
-2024-03-23,Moderate rainfall (~25 mm) in East Asia amid early spring storms
-2024-03-23,Rainfall of about 30 mm fell over Central Africa during seasonal rains
-2024-03-23,Showery weather delivered around 20 mm of rain in Southern North America
-2024-03-23,Moderate to heavy rain (~60 mm) fell over the East of South America
-2024-03-23,Light showers (~15 mm) moved across Central Europe
-2024-03-23,Heavy rain (~100 mm) fell across Eastern Australia
-2024-03-24,Moderate rainfall (~30 mm) in East Asia amid early spring storms
-2024-03-24,Rainfall of about 35 mm fell over Central Africa during seasonal rains
-2024-03-24,Showery weather delivered around 25 mm of rain in Southern North America
-2024-03-24,Moderate to heavy rain (~50 mm) fell over the East of South America
-2024-03-24,Light showers (~10 mm) moved across Central Europe
-2024-03-24,Moderate rainfall (~80 mm) affected Eastern Australia
-2024-03-25,Moderate rainfall (~35 mm) in East Asia amid early spring storms
-2024-03-25,Heavy rain (~40 mm) drenched Central Africa as monsoon storms moved through
-2024-03-25,Showery weather delivered around 30 mm of rain in Southern North America
-2024-03-25,Showers (~40 mm) moved across the East of South America
-2024-03-25,Scattered drizzle (~5 mm) occurred in Central Europe
-2024-03-25,Moderate rainfall (~60 mm) affected Eastern Australia
-2024-03-26,Moderate rainfall (~40 mm) in East Asia amid early spring storms
-2024-03-26,Heavy rain (~45 mm) drenched Central Africa as monsoon storms moved through
-2024-03-26,Intermittent rain (~8 mm) across Western North America
-2024-03-26,Showers (~30 mm) moved across the East of South America
-2024-03-26,Moderate rain (~20 mm) fell over Western Europe
-2024-03-26,Moderate rainfall (~50 mm) affected Eastern Australia
-2024-03-27,Moderate rainfall (~45 mm) in East Asia amid early spring storms
-2024-03-27,Heavy rain (~50 mm) drenched Central Africa as monsoon storms moved through
-2024-03-27,Intermittent rain (~12 mm) across Western North America
-2024-03-27,Light rainfall (~25 mm) was recorded in the East of South America
-2024-03-27,Moderate rain (~25 mm) fell over Western Europe
-2024-03-27,Light rainfall (~40 mm) occurred over Eastern Australia
-2024-03-28,Moderate rainfall (~50 mm) in East Asia amid early spring storms
-2024-03-28,Rainfall of about 20 mm fell over Central Africa during seasonal rains
-2024-03-28,Intermittent rain (~5 mm) across Western North America
-2024-03-28,Light rainfall (~20 mm) was recorded in the East of South America
-2024-03-28,Moderate rain (~30 mm) fell over Western Europe
-2024-03-28,Light rainfall (~30 mm) occurred over Eastern Australia
-2024-03-29,Moderate rainfall (~55 mm) in East Asia amid early spring storms
-2024-03-29,Rainfall of about 15 mm fell over Central Africa during seasonal rains
-2024-03-29,Intermittent rain (~10 mm) across Western North America
-2024-03-29,Light rainfall (~15 mm) was recorded in the East of South America
-2024-03-29,Moderate rain (~35 mm) fell over Western Europe
-2024-03-29,Light rainfall (~25 mm) occurred over Eastern Australia
-2024-03-30,Moderate rainfall (~60 mm) in East Asia amid early spring storms
-2024-03-30,Rainfall of about 10 mm fell over Central Africa during seasonal rains
-2024-03-30,Intermittent rain (~7 mm) across Western North America
-2024-03-30,Light rainfall (~10 mm) was recorded in the East of South America
-2024-03-30,Moderate rain (~40 mm) fell over Western Europe
-2024-03-30,Light rainfall (~20 mm) occurred over Eastern Australia
-2024-03-31,Moderate rainfall (~65 mm) in East Asia amid early spring storms
-2024-03-31,Rainfall of about 5 mm fell over Central Africa during seasonal rains
-2024-03-31,Intermittent rain (~9 mm) across Western North America
-2024-03-31,Light rainfall (~5 mm) was recorded in the East of South America
-2024-03-31,Moderate rain (~45 mm) fell over Western Europe
-2024-03-31,Light rainfall (~15 mm) occurred over Eastern Australia
+date,description
+2024-03-01,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~40 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""West Africa"", ""descrpition"": ""Light rain (~10 mm) in West Africa during the early rainy season""}, {""region"": ""300 cm"", ""descrpition"": ""Blizzard conditions with snow depths around 300 cm and winds up to 190 mph in Western North America""}, {""region"": ""East"", ""descrpition"": ""Showers (~30 mm) moved across the East of South America""}, {""region"": ""Northern Europe"", ""descrpition"": ""Moderate rain (~20 mm) fell over Northern Europe""}, {""region"": ""Southern Australia"", ""descrpition"": ""Light rainfall (~20 mm) occurred over Southern Australia""}]"
+2024-03-02,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~60 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""West Africa"", ""descrpition"": ""Light rain (~15 mm) in West Africa during the early rainy season""}, {""region"": ""Western North America mountains"", ""descrpition"": ""Snowstorm deposited about 50 cm of snow across Western North America mountains""}, {""region"": ""heavy rain (~58.4 mm) fell over the East"", ""descrpition"": ""Moderate to heavy rain (~58.4 mm) fell over the East of South America""}, {""region"": ""Northern Europe"", ""descrpition"": ""Moderate rain (~30 mm) fell over Northern Europe""}, {""region"": ""Southern Australia"", ""descrpition"": ""Light rainfall (~25 mm) occurred over Southern Australia""}]"
+2024-03-03,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~80 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""West Africa"", ""descrpition"": ""Light rain (~5 mm) in West Africa during the early rainy season""}, {""region"": ""Western North America mountains"", ""descrpition"": ""Snowstorm deposited about 60 cm of snow across Western North America mountains""}, {""region"": ""East"", ""descrpition"": ""Showers (~40 mm) moved across the East of South America""}, {""region"": ""Northern Europe"", ""descrpition"": ""Moderate rain (~25 mm) fell over Northern Europe""}, {""region"": ""Southern Australia"", ""descrpition"": ""Light rainfall (~30 mm) occurred over Southern Australia""}]"
+2024-03-04,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~100 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""West Africa"", ""descrpition"": ""Light rain (~8 mm) in West Africa during the early rainy season""}, {""region"": ""Central North America under calm weather"", ""descrpition"": ""Light precipitation (~5 mm) in Central North America under calm weather""}, {""region"": ""heavy rain (~50 mm) fell over the East"", ""descrpition"": ""Moderate to heavy rain (~50 mm) fell over the East of South America""}, {""region"": ""Northern Europe"", ""descrpition"": ""Moderate rain (~35 mm) fell over Northern Europe""}, {""region"": ""Southern Australia"", ""descrpition"": ""Light rainfall (~35 mm) occurred over Southern Australia""}]"
+2024-03-05,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~150 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""West Africa"", ""descrpition"": ""Light rain (~12 mm) in West Africa during the early rainy season""}, {""region"": ""Central North America under calm weather"", ""descrpition"": ""Light precipitation (~10 mm) in Central North America under calm weather""}, {""region"": ""heavy rain (~60 mm) fell over the East"", ""descrpition"": ""Moderate to heavy rain (~60 mm) fell over the East of South America""}, {""region"": ""Unknown"", ""descrpition"": ""Extremely heavy rainfall (~100 mm) drenched Southern Europe during a strong storm""}, {""region"": ""Southern Australia"", ""descrpition"": ""Light rainfall (~40 mm) occurred over Southern Australia""}]"
+2024-03-06,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~200 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""Southern Africa"", ""descrpition"": ""Scattered showers (~20 mm) across Southern Africa""}, {""region"": ""Central North America under calm weather"", ""descrpition"": ""Light precipitation (~8 mm) in Central North America under calm weather""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rainfall (~80 mm) affected the East of South America as storms persisted""}, {""region"": ""Unknown"", ""descrpition"": ""Extremely heavy rainfall (~150 mm) drenched Southern Europe during a strong storm""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~50 mm) affected Southern Australia""}]"
+2024-03-07,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~300 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""Southern Africa"", ""descrpition"": ""Scattered showers (~25 mm) across Southern Africa""}, {""region"": ""Eastern North America"", ""descrpition"": ""Spring showers (~12 mm) across Eastern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rainfall (~90 mm) affected the East of South America as storms persisted""}, {""region"": ""Unknown"", ""descrpition"": ""Extremely heavy rainfall (~200 mm) drenched Southern Europe during a strong storm""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~60 mm) affected Southern Australia""}]"
+2024-03-08,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~250 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""Southern Africa"", ""descrpition"": ""Scattered showers (~30 mm) across Southern Africa""}, {""region"": ""Eastern North America"", ""descrpition"": ""Spring showers (~15 mm) across Eastern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rainfall (~100 mm) affected the East of South America as storms persisted""}, {""region"": ""Unknown"", ""descrpition"": ""Extremely heavy rainfall (~150 mm) drenched Southern Europe during a strong storm""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~70 mm) affected Southern Australia""}]"
+2024-03-09,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~200 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""Southern Africa"", ""descrpition"": ""Scattered showers (~18 mm) across Southern Africa""}, {""region"": ""Eastern North America"", ""descrpition"": ""Spring showers (~20 mm) across Eastern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rainfall (~110 mm) affected the East of South America as storms persisted""}, {""region"": ""Unknown"", ""descrpition"": ""Extremely heavy rainfall (~120 mm) drenched Southern Europe during a strong storm""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~80 mm) affected Southern Australia""}]"
+2024-03-10,"[{""region"": ""Southeast Asia"", ""descrpition"": ""Torrential rain (~150 mm) over Southeast Asia as storms soaked the region""}, {""region"": ""Southern Africa"", ""descrpition"": ""Scattered showers (~22 mm) across Southern Africa""}, {""region"": ""Eastern North America"", ""descrpition"": ""Spring showers (~25 mm) across Eastern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~120 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rain (~80 mm) impacted Southern Europe""}, {""region"": ""Southern Australia"", ""descrpition"": ""Heavy rain (~100 mm) fell across Southern Australia""}]"
+2024-03-11,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~30 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~41°C in East Africa""}, {""region"": ""3 cm diameter"", ""descrpition"": ""Severe thunderstorms brought hail up to 3 cm diameter to Midwestern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~125 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~30 mm) fell over Western Europe""}, {""region"": ""Northern Australia"", ""descrpition"": ""Heavy rain (~120 mm) fell across Northern Australia""}]"
+2024-03-12,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~25 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~42°C in East Africa""}, {""region"": ""Midwestern North America"", ""descrpition"": ""Severe thunderstorms brought rainfall of 40 mm and hail to Midwestern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~130 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~25 mm) fell over Western Europe""}, {""region"": ""Northern Australia"", ""descrpition"": ""Heavy rain (~150 mm) fell across Northern Australia""}]"
+2024-03-13,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~35 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~43°C in East Africa""}, {""region"": ""Midwestern North America"", ""descrpition"": ""Severe thunderstorms brought thunderstorms with 50 mm of rain to Midwestern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~135 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~20 mm) fell over Western Europe""}, {""region"": ""Northern Australia"", ""descrpition"": ""Heavy rain (~180 mm) fell across Northern Australia""}]"
+2024-03-14,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~40 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~44°C in East Africa""}, {""region"": ""Midwestern North America"", ""descrpition"": ""Severe thunderstorms brought severe storms with 60 mm of rain and multiple tornadoes to Midwestern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~140 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Western Europe"", ""descrpition"": ""Light showers (~15 mm) moved across Western Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Very heavy rain (~200 mm) impacted Northern Australia with monsoonal storms""}]"
+2024-03-15,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~45 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~45°C in East Africa""}, {""region"": ""Midwestern North America"", ""descrpition"": ""Severe thunderstorms brought intense storms producing 70 mm of rain and large hail to Midwestern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~145 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Western Europe"", ""descrpition"": ""Light showers (~10 mm) moved across Western Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Very heavy rain (~220 mm) impacted Northern Australia with monsoonal storms""}]"
+2024-03-16,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~50 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~41°C in East Africa""}, {""region"": ""interior Northern North America"", ""descrpition"": ""Late-season snowstorm dropped about 20 inches of snow across interior Northern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~150 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Eastern Europe"", ""descrpition"": ""Scattered drizzle (~5 mm) occurred in Eastern Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Very heavy rain (~240 mm) impacted Northern Australia with monsoonal storms""}]"
+2024-03-17,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~55 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~42°C in East Africa""}, {""region"": ""interior Northern North America"", ""descrpition"": ""Late-season snowstorm dropped about 25 inches of snow across interior Northern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~154 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Eastern Europe"", ""descrpition"": ""Light showers (~10 mm) moved across Eastern Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Exceptional rainfall (~260 mm) inundated Northern Australia as a tropical low passed""}]"
+2024-03-18,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~60 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~43°C in East Africa""}, {""region"": ""interior Northern North America"", ""descrpition"": ""Late-season snowstorm dropped about 30 inches of snow across interior Northern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~140 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Eastern Europe"", ""descrpition"": ""Light showers (~15 mm) moved across Eastern Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Exceptional rainfall (~300 mm) inundated Northern Australia as a tropical low passed""}]"
+2024-03-19,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~65 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~44°C in East Africa""}, {""region"": ""interior Northern North America"", ""descrpition"": ""Late-season snowstorm dropped about 35 inches of snow across interior Northern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~138 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Eastern Europe"", ""descrpition"": ""Moderate rain (~20 mm) fell over Eastern Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Exceptional rainfall (~289 mm) inundated Eastern Australia as a tropical low passed""}]"
+2024-03-20,"[{""region"": ""Central Asia under wetter-than-average conditions"", ""descrpition"": ""Rain showers (~70 mm) in Central Asia under wetter-than-average conditions""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~45°C in East Africa""}, {""region"": ""interior Northern North America"", ""descrpition"": ""Late-season snowstorm dropped about 40 inches of snow across interior Northern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~135 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Eastern Europe"", ""descrpition"": ""Moderate rain (~25 mm) fell over Eastern Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Very heavy rain (~200 mm) impacted Eastern Australia with monsoonal storms""}]"
+2024-03-21,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~15 mm) in East Asia amid early spring storms""}, {""region"": ""East Africa"", ""descrpition"": ""Intense heatwave with temperatures reaching ~43°C in East Africa""}, {""region"": ""15 mm"", ""descrpition"": ""Showery weather delivered around 15 mm of rain in Southern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Torrential rain (~120 mm) soaked the East of South America during stormy conditions""}, {""region"": ""Central Europe"", ""descrpition"": ""Moderate rain (~30 mm) fell over Central Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Heavy rain (~150 mm) fell across Eastern Australia""}]"
+2024-03-22,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~20 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 25 mm fell over Central Africa during seasonal rains""}, {""region"": ""10 mm"", ""descrpition"": ""Showery weather delivered around 10 mm of rain in Southern North America""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rainfall (~80 mm) affected the East of South America as storms persisted""}, {""region"": ""Central Europe"", ""descrpition"": ""Moderate rain (~20 mm) fell over Central Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Heavy rain (~120 mm) fell across Eastern Australia""}]"
+2024-03-23,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~25 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 30 mm fell over Central Africa during seasonal rains""}, {""region"": ""20 mm"", ""descrpition"": ""Showery weather delivered around 20 mm of rain in Southern North America""}, {""region"": ""heavy rain (~60 mm) fell over the East"", ""descrpition"": ""Moderate to heavy rain (~60 mm) fell over the East of South America""}, {""region"": ""Central Europe"", ""descrpition"": ""Light showers (~15 mm) moved across Central Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Heavy rain (~100 mm) fell across Eastern Australia""}]"
+2024-03-24,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~30 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 35 mm fell over Central Africa during seasonal rains""}, {""region"": ""25 mm"", ""descrpition"": ""Showery weather delivered around 25 mm of rain in Southern North America""}, {""region"": ""heavy rain (~50 mm) fell over the East"", ""descrpition"": ""Moderate to heavy rain (~50 mm) fell over the East of South America""}, {""region"": ""Central Europe"", ""descrpition"": ""Light showers (~10 mm) moved across Central Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~80 mm) affected Eastern Australia""}]"
+2024-03-25,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~35 mm) in East Asia amid early spring storms""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rain (~40 mm) drenched Central Africa as monsoon storms moved through""}, {""region"": ""30 mm"", ""descrpition"": ""Showery weather delivered around 30 mm of rain in Southern North America""}, {""region"": ""East"", ""descrpition"": ""Showers (~40 mm) moved across the East of South America""}, {""region"": ""Central Europe"", ""descrpition"": ""Scattered drizzle (~5 mm) occurred in Central Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~60 mm) affected Eastern Australia""}]"
+2024-03-26,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~40 mm) in East Asia amid early spring storms""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rain (~45 mm) drenched Central Africa as monsoon storms moved through""}, {""region"": ""Western North America"", ""descrpition"": ""Intermittent rain (~8 mm) across Western North America""}, {""region"": ""East"", ""descrpition"": ""Showers (~30 mm) moved across the East of South America""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~20 mm) fell over Western Europe""}, {""region"": ""Unknown"", ""descrpition"": ""Moderate rainfall (~50 mm) affected Eastern Australia""}]"
+2024-03-27,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~45 mm) in East Asia amid early spring storms""}, {""region"": ""Unknown"", ""descrpition"": ""Heavy rain (~50 mm) drenched Central Africa as monsoon storms moved through""}, {""region"": ""Western North America"", ""descrpition"": ""Intermittent rain (~12 mm) across Western North America""}, {""region"": ""East"", ""descrpition"": ""Light rainfall (~25 mm) was recorded in the East of South America""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~25 mm) fell over Western Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Light rainfall (~40 mm) occurred over Eastern Australia""}]"
+2024-03-28,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~50 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 20 mm fell over Central Africa during seasonal rains""}, {""region"": ""Western North America"", ""descrpition"": ""Intermittent rain (~5 mm) across Western North America""}, {""region"": ""East"", ""descrpition"": ""Light rainfall (~20 mm) was recorded in the East of South America""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~30 mm) fell over Western Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Light rainfall (~30 mm) occurred over Eastern Australia""}]"
+2024-03-29,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~55 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 15 mm fell over Central Africa during seasonal rains""}, {""region"": ""Western North America"", ""descrpition"": ""Intermittent rain (~10 mm) across Western North America""}, {""region"": ""East"", ""descrpition"": ""Light rainfall (~15 mm) was recorded in the East of South America""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~35 mm) fell over Western Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Light rainfall (~25 mm) occurred over Eastern Australia""}]"
+2024-03-30,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~60 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 10 mm fell over Central Africa during seasonal rains""}, {""region"": ""Western North America"", ""descrpition"": ""Intermittent rain (~7 mm) across Western North America""}, {""region"": ""East"", ""descrpition"": ""Light rainfall (~10 mm) was recorded in the East of South America""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~40 mm) fell over Western Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Light rainfall (~20 mm) occurred over Eastern Australia""}]"
+2024-03-31,"[{""region"": ""East Asia amid early spring storms"", ""descrpition"": ""Moderate rainfall (~65 mm) in East Asia amid early spring storms""}, {""region"": ""Central Africa"", ""descrpition"": ""Rainfall of about 5 mm fell over Central Africa during seasonal rains""}, {""region"": ""Western North America"", ""descrpition"": ""Intermittent rain (~9 mm) across Western North America""}, {""region"": ""East"", ""descrpition"": ""Light rainfall (~5 mm) was recorded in the East of South America""}, {""region"": ""Western Europe"", ""descrpition"": ""Moderate rain (~45 mm) fell over Western Europe""}, {""region"": ""Eastern Australia"", ""descrpition"": ""Light rainfall (~15 mm) occurred over Eastern Australia""}]"

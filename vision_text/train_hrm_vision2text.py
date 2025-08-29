@@ -15,6 +15,8 @@ from transformers import AutoTokenizer
 from models.hrm.hrm_act_v1 import HierarchicalReasoningModel_ACTV1
 from models.hrm.hrm_lm_adapter import HRMAsTextLM
 from functools import partial
+from vision_text.satswin_adapter import build_encoder as build_satswin_encoder
+import json
 
 import torch.multiprocessing as mp
 mp.set_start_method("spawn", force=True)
