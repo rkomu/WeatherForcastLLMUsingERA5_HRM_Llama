@@ -1,5 +1,4 @@
-
-# WeatherLM: Vision-to-Text Weather Narratives from ERA5 using SatSwinMAE + HRM
+# WeatherLM: Vision-to-Text Weather Narratives from ERA5 using SatSwinMAE
 
 
 ## 1) Problem Statement & Design Goals
@@ -25,12 +24,12 @@ ERA5 windows (C × T × H × W)
  Vision→Text Adapter (trainable) ──► P: B × M× dH  (soft prompts in LM space)
           │
       Language Model (frozen) ─────────► logits over vocab → text
-      [HRM-ACTv1 or TinyLlama-1.1B]
+      [TinyLlama-1.1B]
 ```
 
 - **SatSwinMAE** — 3D Swin Transformer + MAE pretraining to learn generic spatiotemporal structure.
 - **Adapter** — small MLP mapping vision latent dim **Dv** → LM embed dim **dH**; outputs **M** soft prefix tokens.
-- **Language Model** — frozen LM (HRM-ACTv1 or TinyLlama-1.1B); consumes `inputs_embeds` (prefix + word embeddings) and emits token logits.
+- **Language Model** — frozen LM (TinyLlama-1.1B); consumes `inputs_embeds` (prefix + word embeddings) and emits token logits.
 
 **Why this separation?**  
 Self-supervised **vision pretraining** scales cheaply; **LM priors** handle discourse. **Adapter-only** training is stable and sample-efficient.
@@ -75,14 +74,12 @@ Self-supervised **vision pretraining** scales cheaply; **LM priors** handle disc
 
 ---
 
-## 5) HRM-ACTv1 (Language Backbone) — What & Why
+## 5) Language Model (TinyLlama-1.1B) — What & Why
 
 - **LM core**: embeddings → Transformer blocks with **RoPE**, **RMSNorm**, **SwiGLU** MLPs; **PyTorch SDPA** attention (portable & stable in fp32/bf16/fp16).
 - **Hierarchical reasoning**: two interacting levels (**H/L**) with configurable cycles; mimics coarse→fine iterative refinement.
 - **ACT (Adaptive Computation Time)**: halting head allows variable steps per example.
 - **Inputs-Embeds path**: `forward_with_embeds(inputs_embeds, attention_mask)` so the first **M** positions can be **soft prompts** from vision.
-
-**Why HRM (vs a generic LM)**: weather narratives often benefit from **iterative** reasoning (“if low deepens then…”). HRM’s H/L cycles and ACT provide a natural mechanism for this, even when frozen—the adapter learns to place prompts that guide these steps.
 
 ---
 
@@ -228,10 +225,8 @@ loss.backward(); opt.step()
 
 ## 14) File Layout (orientation)
 
-- `sat_swin_mae/` — encoder, patch/embed, MAE training.  
-- `models/hrm/` — HRM-ACTv1 (hierarchical LM), layers (SDPA attention).  
-- `vision_text/` — adapter training and date‑driven inference (both HRM and TinyLlama versions).
-  - `train_hrm_vision2text.py` — HRM-based vision-to-text training
+- `sat_swin_mae/` — encoder, patch/embed, MAE training.
+- `vision_text/` — adapter training and date‑driven inference (TinyLlama versions).
   - `train_tinyllama_vision2text.py` — TinyLlama-based vision-to-text training with QLoRA support
   - `infer_tinyllama_vision2text.py` — TinyLlama inference script
 - `dataset_*` — ERA5 & caption datasets (multi‑caption per date).
@@ -281,18 +276,3 @@ python infer_tinyllama_vision2text.py \
   --adapter_ckpt checkpoints_v2t/tinyllama_adapter_final.pt \
   --max_new_tokens 128 --temperature 0.7
 ```
-
-### 15.3 HRM Vision-to-Text Training
-
-```bash
-python -m vision_text.train_hrm_vision2text \
-  --files "dataset/raw_data/nc_*/*.nc" \
-  --variables t2m sp \
-  --mae_ckpt checkpoints/satswinmae_epoch10.pt \
-  --caption_csv dataset/weather/weather_august_2024.csv \
-  --epochs 10 --batch_size 4 --lr 1e-4
-```
-
----
-
-*End of technical overview.*
