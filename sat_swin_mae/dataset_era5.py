@@ -6,6 +6,29 @@ from torch.utils.data import Dataset
 import pandas as pd
 import re
 
+import concurrent.futures
+import importlib
+try:
+    from tqdm import tqdm
+except Exception:
+    # minimal fallback so code works when tqdm is not installed
+    class _DummyTqdm:
+        def __init__(self, iterable=None, total=None, **kwargs):
+            self._iterable = iterable
+            self.total = total
+            self.desc = kwargs.get("desc", None)
+        def __iter__(self):
+            return iter(self._iterable) if self._iterable is not None else iter(())
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def update(self, n=1):
+            pass
+    def tqdm(iterable=None, **kwargs):
+        # support both iterator-wrapping and context-manager usage and forward kwargs
+        return _DummyTqdm(iterable, **kwargs)
+
 try:
     import xarray as xr
 except Exception:
@@ -154,12 +177,33 @@ class ERA5CubeDataset(Dataset):
             warnings.warn(f"[ERA5CubeDataset] Skipping {len(missing)} missing files (e.g., {missing[:2]})")
 
         valid_files, bad = [], []
-        for fp in existing:
-            ok, err = _probe_nc(fp, netcdf_engine)
-            if ok:
-                valid_files.append(fp)
-            else:
-                bad.append((fp, err))
+        # Probe files concurrently to speed up I/O-bound checks. Use a thread pool
+        # because xarray/netCDF reading is I/O-bound and threads improve throughput.
+        if len(existing) <= 4:
+            # small number of files: probe serially to avoid thread overhead
+            for fp in tqdm(existing, total=len(existing), desc="Probing files"):
+                ok, err = _probe_nc(fp, netcdf_engine)
+                if ok:
+                    valid_files.append(fp)
+                else:
+                    bad.append((fp, err))
+        else:
+            max_workers = min(32, (os.cpu_count() or 1) * 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+                fut_to_fp = {ex.submit(_probe_nc, fp, netcdf_engine): fp for fp in existing}
+                # show progress as futures complete
+                with tqdm(total=len(fut_to_fp), desc="Probing files (concurrent)") as pbar:
+                    for fut in concurrent.futures.as_completed(fut_to_fp):
+                        fp = fut_to_fp[fut]
+                        try:
+                            ok, err = fut.result()
+                        except Exception as e:
+                            ok, err = False, str(e)
+                        if ok:
+                            valid_files.append(fp)
+                        else:
+                            bad.append((fp, err))
+                        pbar.update(1)
         if bad:
             preview = ", ".join([f for f,_ in bad[:3]])
             warnings.warn(f"[ERA5CubeDataset] Skipping {len(bad)} unreadable files (e.g., {preview})")
@@ -199,8 +243,15 @@ class ERA5CubeDataset(Dataset):
             coords="minimal",
             compat="override",
             join="outer",     # allow different time lengths
-            parallel=False,
+            parallel=False,     # may be flipped to True below if dask is installed
         )
+        # If dask is available, allow xarray to open files in parallel (faster for many files)
+        try:
+            if importlib.util.find_spec("dask") is not None:
+                open_kwargs["parallel"] = True
+        except Exception:
+            pass
+
         if netcdf_engine:
             ds = xr.open_mfdataset(valid_files, engine=netcdf_engine, **open_kwargs)
         else:
@@ -243,7 +294,8 @@ class ERA5CubeDataset(Dataset):
         chans = []
         chan_names = []
 
-        for v in variables:
+        # iterate variables with progress indicator (falls back if tqdm missing)
+        for v in tqdm(variables, total=len(variables), desc="Processing variables"):
             da = ds[v]
 
             # normalize dim names
