@@ -100,12 +100,41 @@ def _normalize_date_key(x) -> pd.Timestamp:
 
 def load_captions(csv_path: Optional[str],
                   date_col_override: Optional[str] = None,
-                  text_col_override: Optional[str] = None) -> CaptionTable:
+                  text_col_override: Optional[str] = None,
+                  location_col_override: Optional[str] = None,
+                  location_values: Optional[List[str]] = None) -> CaptionTable:
     if not csv_path:
         return CaptionTable({}, {}, "none")
 
     df = pd.read_csv(csv_path)
     cols_lower = {c.lower(): c for c in df.columns}
+
+    # Optional location filtering (case-insensitive)
+    if location_values:
+        loc_col = None
+        if location_col_override:
+            if location_col_override not in df.columns:
+                raise ValueError(
+                    f"{csv_path} missing overridden location column: {location_col_override!r}. "
+                    f"Found: {list(df.columns)}"
+                )
+            loc_col = location_col_override
+        else:
+            candidate_loc_names = ["location", "region", "city", "area", "site"]
+            loc_col = next((cols_lower[k] for k in candidate_loc_names if k in cols_lower), None)
+            if loc_col is None:
+                raise ValueError(
+                    f"{csv_path} requires --caption_location_col when using --caption_location_values. "
+                    f"Found columns: {list(df.columns)}"
+                )
+        values_norm = {str(v).strip().casefold() for v in location_values}
+        filtered = df[df[loc_col].astype(str).str.strip().str.casefold().isin(values_norm)]
+        if filtered.empty:
+            raise ValueError(
+                f"{csv_path} contains no rows matching {loc_col!r} in {sorted(values_norm)}"
+            )
+        df = filtered
+        cols_lower = {c.lower(): c for c in df.columns}
 
     # Explicit overrides
     if date_col_override and text_col_override:
@@ -118,7 +147,13 @@ def load_captions(csv_path: Optional[str],
         by_date = {}
         for _, row in df.iterrows():
             key = _normalize_date_key(row[dcol])
-            by_date[key] = str(row[tcol]).strip()
+            text = str(row[tcol]).strip()
+            if not text:
+                continue
+            if key in by_date and by_date[key]:
+                by_date[key] = f"{by_date[key]}\n{text}"
+            else:
+                by_date[key] = text
         return CaptionTable({}, by_date, "date")
 
     # Auto: path/caption
@@ -142,7 +177,13 @@ def load_captions(csv_path: Optional[str],
         by_date = {}
         for _, row in df.iterrows():
             key = _normalize_date_key(row[date_col])
-            by_date[key] = str(row[text_col]).strip()
+            text = str(row[text_col]).strip()
+            if not text:
+                continue
+            if key in by_date and by_date[key]:
+                by_date[key] = f"{by_date[key]}\n{text}"
+            else:
+                by_date[key] = text
         return CaptionTable({}, by_date, "date")
 
     # Better error
@@ -386,10 +427,17 @@ def build_argparser():
     ap.add_argument("--split_mode", type=str, default="chronological", choices=["chronological", "random"])
     ap.add_argument("--seed", type=int, default=42)
 
-    ap.add_argument("--caption_csv", type=str, default=None)
+    ap.add_argument("--caption_csv", type=str, default=None,
+                    help="CSV with caption metadata (date/path based)")
     ap.add_argument("--drop_if_no_caption", action="store_true")
-    ap.add_argument("--caption_date_col", type=str, default=None)
-    ap.add_argument("--caption_text_col", type=str, default=None)
+    ap.add_argument("--caption_date_col", type=str, default=None,
+                    help="Explicit date column name in caption CSV")
+    ap.add_argument("--caption_text_col", type=str, default=None,
+                    help="Explicit text column name in caption CSV")
+    ap.add_argument("--caption_location_col", type=str, default=None,
+                    help="Optional location column used to filter caption rows")
+    ap.add_argument("--caption_location_values", nargs="+", default=None,
+                    help="Case-insensitive list of allowed location values")
     ap.add_argument("--anchor", type=str, choices=["first", "middle", "last"], default="first")
 
     # training
@@ -818,7 +866,9 @@ def main():
     captions = load_captions(
         args.caption_csv,
         date_col_override=args.caption_date_col,
-        text_col_override=args.caption_text_col
+        text_col_override=args.caption_text_col,
+        location_col_override=args.caption_location_col,
+        location_values=args.caption_location_values
     )
 
     # Build loaders

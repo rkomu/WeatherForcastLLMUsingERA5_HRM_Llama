@@ -29,7 +29,9 @@ python vision_text/train_hrm_vision2text.py \
     --epochs 5 \
     --batch_size 2 \
     --mae_ckpt "checkpoints/satswinmae_epoch10.pt" \
-    --caption_csv "dataset/weather/weather_august_2024.csv" \
+    --caption_csv "dataset/weather/tokyo_weather_2023-2025.csv" \
+    --caption_location_col "location" \
+    --caption_location_values Tokyo \
     --mlflow_experiment_name "hrm_vision2text_experiment" \
     --mlflow_run_name "baseline_v1"
 ```
@@ -45,7 +47,9 @@ python vision_text/train_hrm_vision2text.py \
     --epochs 5 \
     --batch_size 2 \
     --mae_ckpt "checkpoints/satswinmae_epoch10.pt" \
-    --caption_csv "dataset/weather/weather_august_2024.csv" \
+    --caption_csv "dataset/weather/tokyo_weather_2023-2025.csv" \
+    --caption_location_col "location" \
+    --caption_location_values Tokyo \
     --disable_mlflow
 ```
 
@@ -60,7 +64,9 @@ python vision_text/train_hrm_vision2text.py \
     --epochs 5 \
     --batch_size 2 \
     --mae_ckpt "checkpoints/satswinmae_epoch10.pt" \
-    --caption_csv "dataset/weather/weather_august_2024.csv" \
+    --caption_csv "dataset/weather/tokyo_weather_2023-2025.csv" \
+    --caption_location_col "location" \
+    --caption_location_values Tokyo \
     --mlflow_tracking_uri "http://mlflow-server:5000" \
     --mlflow_experiment_name "remote_hrm_vision2text"
 ```
@@ -87,7 +93,9 @@ python vision_text/train_hrm_vision2text.py \
     --epochs 5 \
     --batch_size 2 \
     --mae_ckpt "checkpoints/satswinmae_epoch10.pt" \
-    --caption_csv "dataset/weather/weather_august_2024.csv" \
+    --caption_csv "dataset/weather/tokyo_weather_2023-2025.csv" \
+    --caption_location_col "location" \
+    --caption_location_values Tokyo \
     --mlflow_tags env=production model_version=v1.0 dataset=era5_2024
 ```
 
@@ -102,7 +110,9 @@ python vision_text/train_hrm_vision2text.py \
     --epochs 10 \
     --batch_size 2 \
     --mae_ckpt "checkpoints/satswinmae_epoch10.pt" \
-    --caption_csv "dataset/weather/weather_august_2024.csv" \
+    --caption_csv "dataset/weather/tokyo_weather_2023-2025.csv" \
+    --caption_location_col "location" \
+    --caption_location_values Tokyo \
     --log_model_every_n_epochs 3  # Log model every 3 epochs
 ```
 
@@ -168,7 +178,9 @@ python vision_text/train_hrm_vision2text.py \
     --n_latents 32 \
     --adapter_layers 2 \
     --adapter_heads 8 \
-    --caption_csv "dataset/weather/weather_august_2024.csv" \
+    --caption_csv "dataset/weather/tokyo_weather_2023-2025.csv" \
+    --caption_location_col "location" \
+    --caption_location_values Tokyo \
     --drop_if_no_caption \
     --mlflow_experiment_name "hrm_vision2text_production" \
     --mlflow_run_name "adapter_large_v1" \

@@ -251,8 +251,9 @@ python -m vision_text.train_tinyllama_vision2text \
   --window_T 8 --window_H 64 --window_W 64 \
   --stride_T 4 --stride_H 32 --stride_W 32 \
   --mae_ckpt checkpoints/satswinmae_epoch59.pt \
-  --caption_csv dataset/weather/weather_jan_may_2024.csv \
+  --caption_csv dataset/weather/tokyo_weather_2023-2025.csv \
   --caption_date_col date --caption_text_col "event description" \
+  --caption_location_col location --caption_location_values Tokyo \
   --drop_if_no_caption --anchor last \
   --batch_size 32 --epochs 100 --lr 0.0001 \
   --n_latents 32 --adapter_layers 2 --adapter_heads 8
@@ -264,7 +265,9 @@ python -m vision_text.train_tinyllama_vision2text \
   --files "dataset/raw_data/nc_*/*.nc" \
   --variables u10 v10 r sp ssrd t cp \
   --mae_ckpt checkpoints/satswinmae_epoch59.pt \
-  --caption_csv dataset/weather/weather_jan_may_2024.csv \
+  --caption_csv dataset/weather/tokyo_weather_2023-2025.csv \
+  --caption_date_col date --caption_text_col "event description" \
+  --caption_location_col location --caption_location_values Tokyo \
   --use_qlora --lora_r 16 --lora_alpha 32 --lora_dropout 0.1 \
   --batch_size 16 --epochs 50 --lr 0.0001
 ```
@@ -289,7 +292,8 @@ python -m vision_text.train_hrm_vision2text \
   --files "dataset/raw_data/nc_*/*.nc" \
   --variables t2m sp \
   --mae_ckpt checkpoints/satswinmae_epoch10.pt \
-  --caption_csv dataset/weather/weather_august_2024.csv \
+  --caption_csv dataset/weather/tokyo_weather_2023-2025.csv \
+  --caption_location_col location --caption_location_values Tokyo \
   --epochs 10 --batch_size 4 --lr 1e-4
 ```
 
