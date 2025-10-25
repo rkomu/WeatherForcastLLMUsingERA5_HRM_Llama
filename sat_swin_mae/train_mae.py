@@ -3,6 +3,7 @@ import os
 import argparse
 import glob
 import random
+import time
 from typing import List
 
 import torch
@@ -384,8 +385,15 @@ def run_training(args):
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
         train_loss_sum = 0.0
         train_batch_count = 0
+        first_batch_t0 = time.perf_counter()
+        first_batch_logged = False
         
         for batch in pbar:
+            if not first_batch_logged:
+                latency = time.perf_counter() - first_batch_t0
+                pbar.write(f"[loader] First batch ready after {latency:.1f}s "
+                           f"(batch_size={args.batch_size}, num_workers={train_loader.num_workers})")
+                first_batch_logged = True
             data, valid = unpack_and_move(batch, args.device)
             loss, _ = model(data, compute_loss=True, valid_mask=valid)
             pbar.set_postfix(loss=f"{loss.item():.4f}")
