@@ -11,6 +11,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
@@ -183,6 +184,19 @@ def parse_args():
                     help="Start of time range (e.g., '2000-01-01' or '2000-01-01 06:00'). Inclusive.")
     ap.add_argument("--time_end",   type=str, default=None,
                     help="End of time range (e.g., '2000-08-31'). Inclusive.")
+    ap.add_argument("--loader_workers", type=int, default=2,
+                    help="Number of DataLoader worker processes. Set to 0 to debug single-process loading.")
+    ap.add_argument("--loader_prefetch_factor", type=int, default=2,
+                    help="prefetch_factor for each worker. Ignored if workers=0.")
+    ap.add_argument("--loader_pin_memory", dest="loader_pin_memory", action="store_true",
+                    help="Pin CPU tensors before moving to GPU (default).")
+    ap.add_argument("--no_loader_pin_memory", dest="loader_pin_memory", action="store_false",
+                    help="Disable pin_memory to reduce host RAM pressure.")
+    ap.set_defaults(loader_pin_memory=True)
+    ap.add_argument("--grad_accum_steps", type=int, default=1,
+                    help="Number of steps to accumulate gradients before each optimizer step.")
+    ap.add_argument("--use_amp", action="store_true",
+                    help="Enable torch.cuda.amp autocast/GradScaler for mixed precision.")
     
     # MLflow tracking arguments
     ap.add_argument("--mlflow_tracking_uri", type=str, default=None,
@@ -201,7 +215,9 @@ def parse_args():
     return ap.parse_args()
 
 
-def make_loader(files, variables, window, stride, batch_size, shuffle, time_start=None, time_end=None):
+def make_loader(files, variables, window, stride, batch_size, shuffle,
+                time_start=None, time_end=None, num_workers=2,
+                pin_memory=True, prefetch_factor=2):
     ds = ERA5CubeDataset(
         files, variables, window, stride,
         time_start=time_start, time_end=time_end,
@@ -213,8 +229,24 @@ def make_loader(files, variables, window, stride, batch_size, shuffle, time_star
             f"Shapes T/H/W={ds.T}/{ds.H}/{ds.W}, window={window}, stride={stride}, "
             f"time_start={time_start}, time_end={time_end}"
         )
-    print(f"[dataset] T/H/W={ds.T}/{ds.H}/{ds.W}, C={ds.C}, windows={n}")
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
+    approx_sample_bytes = ds.C * window["T"] * window["H"] * window["W"] * 4
+    approx_batch_gb = (approx_sample_bytes * batch_size) / (1024 ** 3)
+    prefetch = prefetch_factor if (num_workers > 0 and prefetch_factor is not None) else 0
+    print(
+        f"[dataset] T/H/W={ds.T}/{ds.H}/{ds.W}, C={ds.C}, windows={n} | "
+        f"~{approx_sample_bytes/1e6:.1f} MB/sample, ~{approx_batch_gb:.2f} GB/batch "
+        f"(workers={num_workers}, prefetch={prefetch}, pin_memory={pin_memory})"
+    )
+
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0 and prefetch_factor is not None:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(ds, **loader_kwargs)
 
 
 def unpack_and_move(batch, device):
@@ -292,6 +324,11 @@ def main():
                 "time_start": args.time_start,
                 "time_end": args.time_end,
                 "log_model_every_n_epochs": args.log_model_every_n_epochs,
+                "loader_workers": args.loader_workers,
+                "loader_prefetch_factor": args.loader_prefetch_factor,
+                "loader_pin_memory": args.loader_pin_memory,
+                "grad_accum_steps": args.grad_accum_steps,
+                "use_amp": args.use_amp,
             })
             
             run_training(args)
@@ -322,13 +359,18 @@ def run_training(args):
     window = {"T": args.window_T, "H": args.window_H, "W": args.window_W}
     stride = {"T": args.stride_T, "H": args.stride_H, "W": args.stride_W}
 
+    loader_opts = dict(
+        num_workers=args.loader_workers,
+        pin_memory=args.loader_pin_memory,
+        prefetch_factor=args.loader_prefetch_factor,
+    )
     train_loader = make_loader(
         train_files, args.variables, window, stride, args.batch_size, True,
-        time_start=args.time_start, time_end=args.time_end
+        time_start=args.time_start, time_end=args.time_end, **loader_opts
     )
     val_loader = make_loader(
         val_files, args.variables, window, stride, args.batch_size, False,
-        time_start=args.time_start, time_end=args.time_end
+        time_start=args.time_start, time_end=args.time_end, **loader_opts
     )
 
     in_chans = int(train_loader.dataset.C)
@@ -375,6 +417,10 @@ def run_training(args):
         })
 
     opt = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    amp_enabled = bool(args.use_amp and ("cuda" in str(args.device).lower()))
+    if args.use_amp and not amp_enabled:
+        print("[train_mae] --use_amp requested but CUDA device not detected; running in full precision.")
+    scaler = GradScaler(enabled=amp_enabled)
 
     # adjusts the learning rate following a cosine curve, decreasing it to a minimum value and then restarting
     sched = CosineAnnealingLR(opt, T_max=args.epochs)
@@ -387,23 +433,39 @@ def run_training(args):
         train_batch_count = 0
         first_batch_t0 = time.perf_counter()
         first_batch_logged = False
-        
-        for batch in pbar:
+        accum_steps = max(1, args.grad_accum_steps)
+        opt.zero_grad()
+        num_batches = len(train_loader)
+
+        for step, batch in enumerate(pbar, start=1):
             if not first_batch_logged:
                 latency = time.perf_counter() - first_batch_t0
                 pbar.write(f"[loader] First batch ready after {latency:.1f}s "
                            f"(batch_size={args.batch_size}, num_workers={train_loader.num_workers})")
                 first_batch_logged = True
             data, valid = unpack_and_move(batch, args.device)
-            loss, _ = model(data, compute_loss=True, valid_mask=valid)
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+            with autocast(enabled=amp_enabled):
+                loss, _ = model(data, compute_loss=True, valid_mask=valid)
+            loss_value = loss.item()
+            pbar.set_postfix(loss=f"{loss_value:.4f}")
 
-            opt.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+            scaled_loss = loss / accum_steps
+            if amp_enabled:
+                scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+            if step % accum_steps == 0 or step == num_batches:
+                if amp_enabled:
+                    scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                if amp_enabled:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
+                opt.zero_grad()
             
-            train_loss_sum += loss.item()
+            train_loss_sum += loss_value
             train_batch_count += 1
 
         # Calculate average training loss
@@ -414,7 +476,8 @@ def run_training(args):
         with torch.no_grad():
             for batch in val_loader:
                 data, valid = unpack_and_move(batch, args.device)
-                loss, _ = model(data, compute_loss=True, valid_mask=valid)
+                with autocast(enabled=amp_enabled):
+                    loss, _ = model(data, compute_loss=True, valid_mask=valid)
                 vtotal += loss.item() * data.size(0)
         # print(f"vtotal: {vtotal} , len(val_loader.dataset): {len(val_loader.dataset)}")
         if len(val_loader.dataset) > 0:

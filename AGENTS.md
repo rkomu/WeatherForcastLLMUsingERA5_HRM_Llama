@@ -64,6 +64,12 @@ python infer_tinyllama_vision2text.py \
 - Keep TinyLlama’s max sequence length ≥ `n_latents + max_caption_tokens`.
 - Start in fp32 for stability, then switch to bf16 once gradients look healthy.
 
+## SatSwinMAE Performance Notes
+- **Loader parallelism**: `train_mae.py` now exposes `--loader_workers`, `--loader_prefetch_factor`, and `--loader_pin_memory` so you can saturate an RTX 3090 once the cubes are light enough. The default `train_mae.sh` sets `--loader_workers 6 --loader_prefetch_factor 4`; lower these on slower disks.
+- **Gradient accumulation**: Use `--grad_accum_steps` to keep an effective large batch while only materializing a handful of windows per step. The launcher currently pairs `--batch_size 4` with `--grad_accum_steps 4` to emulate a batch of 16.
+- **Cache ERA5 cubes**: For sustained throughput, run an offline job that walks `dataset/raw_data/**/*.nc`, extracts `(C,T,H,W)` windows once, and stores them as `.npy`/Zarr chunks on NVMe. Point future training runs at the cached directory by swapping in a dataset wrapper that memory-maps the cubes so PyTorch never re-reads NetCDF or recomputes normalization.
+- **Mixed precision (AMP)**: Pass `--use_amp` to `train_mae.py` once data loading is no longer the bottleneck. The loop now wraps forward/backward passes with `torch.cuda.amp.autocast` and `GradScaler` to cut GPU memory and speed math on Ada/Ampere GPUs.
+
 
 
 ## Project Structure & Module Organization
@@ -96,4 +102,3 @@ python infer_tinyllama_vision2text.py \
 ## Configuration & Tracking
 - Store reusable hyperparameters under `config/`; update YAMLs in tandem with code so `all_config.yaml` snapshots remain trustworthy.
 - If you modify tracking behavior, ensure `MLFLOW_GUIDE.md` reflects the new workflow and keep `start_mlflow_server.py` defaults in sync with README instructions.
-
