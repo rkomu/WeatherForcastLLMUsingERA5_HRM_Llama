@@ -8,6 +8,8 @@ import re
 
 import concurrent.futures
 import importlib
+import logging
+
 try:
     from tqdm import tqdm
 except Exception:
@@ -33,6 +35,9 @@ try:
     import xarray as xr
 except Exception:
     xr = None
+
+# module logger; application can configure handlers/levels
+logger = logging.getLogger(__name__)
 
 TIME_CANDIDATES = ["time", "valid_time", "forecast_time", "analysis_time", "initial_time"]
 LAT_CANDIDATES  = ["latitude", "lat", "y"]
@@ -66,8 +71,10 @@ def _probe_nc(fp, engine=None):
             with xr.open_dataset(fp) as ds:
                 _ = tuple(ds.sizes.items())
         return True, None
-    except Exception as e:
-        return False, str(e)
+    except Exception:
+        # Return the full formatted traceback so callers can inspect why a file failed to open
+        import traceback as _tb
+        return False, _tb.format_exc()
 
 
 # Helper to guess date from file path
@@ -170,33 +177,40 @@ class ERA5CubeDataset(Dataset):
 
         # ---------- filter file paths ----------
         paths = [str(p) for p in files]
-        print(f"[ERA5CubeDataset] Found {len(paths)} files")
+        logger.info(f"[ERA5CubeDataset] Found {len(paths)} files")
         existing = [p for p in paths if os.path.exists(p)]
         missing = [p for p in paths if not os.path.exists(p)]
         if missing:
+            logger.warning(f"[ERA5CubeDataset] Skipping {len(missing)} missing files (e.g., {missing[:2]})")
             warnings.warn(f"[ERA5CubeDataset] Skipping {len(missing)} missing files (e.g., {missing[:2]})")
 
         valid_files, bad = [], []
-        # Probe files concurrently to speed up I/O-bound checks. Use a thread pool
-        # because xarray/netCDF reading is I/O-bound and threads improve throughput.
+        # Probe files concurrently to speed up I/O-bound checks. Use a thread or
+        # process pool depending on backend. The netCDF4/HDF5 C library is not
+        # reliably thread-safe; when netCDF4 is present we use processes to
+        # isolate C library calls and avoid HDF errors.
         if len(existing) <= 4:
-            # small number of files: probe serially to avoid thread overhead
+            # small number of files: probe serially to avoid overhead
             for fp in tqdm(existing, total=len(existing), desc="Probing files"):
                 ok, err = _probe_nc(fp, netcdf_engine)
                 if ok:
                     valid_files.append(fp)
                 else:
                     bad.append((fp, err))
+                    logger.debug(f"Probing failed for {fp}: {str(err).splitlines()[0] if err else '<no error>'}")
         else:
-            max_workers = min(32, (os.cpu_count() or 1) * 4)
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+            # Use processes to avoid HDF5 thread-safety issues. Keep worker
+            # count modest to limit per-process import overhead.
+            from concurrent.futures import ProcessPoolExecutor
+            max_workers = min(8, max(1, (os.cpu_count() or 1)))
+            with ProcessPoolExecutor(max_workers=max_workers) as ex:
                 fut_to_fp = {ex.submit(_probe_nc, fp, netcdf_engine): fp for fp in existing}
                 # show progress as futures complete
-                with tqdm(total=len(fut_to_fp), desc="Probing files (concurrent)") as pbar:
+                with tqdm(total=len(fut_to_fp), desc="Probing files (concurrent, processes)") as pbar:
                     for fut in concurrent.futures.as_completed(fut_to_fp):
                         fp = fut_to_fp[fut]
                         try:
-                            ok, err = fut.result()
+                            ok, err = fut.result(timeout=30)
                         except Exception as e:
                             ok, err = False, str(e)
                         if ok:
@@ -204,9 +218,23 @@ class ERA5CubeDataset(Dataset):
                         else:
                             bad.append((fp, err))
                         pbar.update(1)
+
         if bad:
-            preview = ", ".join([f for f,_ in bad[:3]])
-            warnings.warn(f"[ERA5CubeDataset] Skipping {len(bad)} unreadable files (e.g., {preview})")
+            # Build a concise preview for the warning (filename: first line of error) and
+            # also print the full traceback for the first few errors to stderr to aid debugging.
+            previews = []
+            for fpath, err in bad[:5]:
+                short = err.splitlines()[0] if err else "<no message>"
+                previews.append(f"{os.path.basename(fpath)}: {short[:200]}")
+            logger.warning(f"[ERA5CubeDataset] Skipping {len(bad)} unreadable files. Examples: {', '.join(previews)}")
+            warnings.warn(f"[ERA5CubeDataset] Skipping {len(bad)} unreadable files. Examples: {', '.join(previews)}")
+            try:
+                for fpath, err in bad[:10]:
+                    # log full traceback at error level for debugging
+                    logger.error(f"[ERA5CubeDataset][ERROR] File: {fpath}\n{err}\n")
+            except Exception:
+                # best-effort logging; don't fail dataset construction because of logging
+                logger.exception("Failed while attempting to log bad file tracebacks")
 
         if not valid_files:
             raise ValueError("[ERA5CubeDataset] No valid ERA5 files left after filtering.")
@@ -215,7 +243,7 @@ class ERA5CubeDataset(Dataset):
         if time_start or time_end:
             ts_date = pd.to_datetime(time_start).date() if time_start else None
             te_date = pd.to_datetime(time_end).date() if time_end else None
-            print(f"[ERA5CubeDataset] date prefilter: time_start={ts_date}, time_end={te_date}")
+            logger.info(f"[ERA5CubeDataset] date prefilter: time_start={ts_date}, time_end={te_date}")
             pre_keep, pre_drop, no_date = [], [], []
             for fp in valid_files:
                 d = _guess_date_from_path(fp)
@@ -228,11 +256,13 @@ class ERA5CubeDataset(Dataset):
                         pre_drop.append(fp)
             if pre_drop:
                 previews = ", ".join(os.path.basename(p) for p in pre_drop[:3])
+                logger.warning(f"[ERA5CubeDataset] Prefilter dropping {len(pre_drop)} files by filename date (e.g., {previews})")
                 warnings.warn(f"[ERA5CubeDataset] Prefilter dropping {len(pre_drop)} files by filename date (e.g., {previews})")
             if no_date:
                 previews = ", ".join(os.path.basename(p) for p in no_date[:3])
+                logger.warning(f"[ERA5CubeDataset] {len(no_date)} files had no detectable date in name (e.g., {previews}); keeping them.")
                 warnings.warn(f"[ERA5CubeDataset] {len(no_date)} files had no detectable date in name (e.g., {previews}); keeping them.")
-            print(f"[ERA5CubeDataset] Prefiltered {len(valid_files)} files to {len(pre_keep)} valid files after date check.")
+            logger.info(f"[ERA5CubeDataset] Prefiltered {len(valid_files)} files to {len(pre_keep)} valid files after date check.")
             valid_files = pre_keep + no_date
             if not valid_files:
                 raise ValueError("[ERA5CubeDataset] No files left after filename date prefilter.")
@@ -245,17 +275,29 @@ class ERA5CubeDataset(Dataset):
             join="outer",     # allow different time lengths
             parallel=False,     # may be flipped to True below if dask is installed
         )
-        # If dask is available, allow xarray to open files in parallel (faster for many files)
-        try:
-            if importlib.util.find_spec("dask") is not None:
-                open_kwargs["parallel"] = False
-        except Exception:
-            pass
 
-        if netcdf_engine:
-            ds = xr.open_mfdataset(valid_files, engine=netcdf_engine, **open_kwargs)
-        else:
-            ds = xr.open_mfdataset(valid_files, **open_kwargs)
+        logger.info(f"[ERA5CubeDataset] Opening {len(valid_files)} files with engine={netcdf_engine}")
+        try:
+            if netcdf_engine:
+                ds = xr.open_mfdataset(valid_files, engine=netcdf_engine, **open_kwargs)
+            else:
+                ds = xr.open_mfdataset(valid_files, **open_kwargs)
+        except Exception:
+            logger.exception("Failed to open datasets with xarray.open_mfdataset")
+            raise
+
+        # log time bounds if available
+        try:
+            time_coord = _pick_dim_name(ds, TIME_CANDIDATES)
+            if time_coord in ds:
+                try:
+                    first = ds[time_coord].values[0]
+                    last = ds[time_coord].values[-1]
+                    logger.info(f"[ERA5CubeDataset] Dataset time range (raw): {first} -> {last}")
+                except Exception:
+                    logger.debug("Could not read first/last time values from dataset")
+        except Exception:
+            logger.debug("Could not determine time coord for logging")
 
         # ---------- time filter (inclusive) ----------
         time_name = _pick_dim_name(ds, TIME_CANDIDATES)
@@ -297,6 +339,7 @@ class ERA5CubeDataset(Dataset):
         # iterate variables with progress indicator (falls back if tqdm missing)
         for v in tqdm(variables, total=len(variables), desc="Processing variables"):
             da = ds[v]
+            logger.debug(f"Processing variable '{v}' dims={list(da.dims)} sizes={{k:int(v) for k,v in da.sizes.items()}} if hasattr(da,'sizes') else None")
 
             # normalize dim names
             ren = {}
@@ -336,6 +379,7 @@ class ERA5CubeDataset(Dataset):
                 else:
                     levels = [int(x) for x in list(da[lvl_name].values)]
 
+                logger.debug(f"Variable '{v}' has level dim '{lvl_name}' -> using levels {levels} (pressure_handling={self.pressure_handling})")
                 for L in levels:
                     dL = _prep_spatial(da.sel({lvl_name: L}))
                     chans.append(dL.expand_dims({"var": [f"{v}_pl{L}"]}))

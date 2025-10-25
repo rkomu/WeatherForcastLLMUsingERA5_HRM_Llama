@@ -38,9 +38,9 @@ fi
 "$PYTHON_BIN" -m vision_text.train_tinyllama_vision2text \
   --files "dataset/raw_data/nc_*/*.nc" \
   --variables u10 v10 r sp ssrd t cp \
-  --window_T 8 --window_H 64 --window_W 64 \
-  --stride_T 4 --stride_H 32 --stride_W 32 \
-  --time_start 2024-01-01 --time_end 2024-03-30 \
+  --window_T 48 --window_H 64 --window_W 64 \
+  --stride_T 24 --stride_H 32 --stride_W 32 \
+  --time_start 2024-01-01 --time_end 2024-01-15 \
   \
   --caption_csv dataset/weather/tokyo_weather_2023-2025.csv \
   --caption_date_col date --caption_text_col "event description" \
