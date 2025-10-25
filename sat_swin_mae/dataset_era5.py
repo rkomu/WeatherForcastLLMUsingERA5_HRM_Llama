@@ -248,7 +248,7 @@ class ERA5CubeDataset(Dataset):
         # If dask is available, allow xarray to open files in parallel (faster for many files)
         try:
             if importlib.util.find_spec("dask") is not None:
-                open_kwargs["parallel"] = True
+                open_kwargs["parallel"] = False
         except Exception:
             pass
 
