@@ -65,10 +65,11 @@ python infer_tinyllama_vision2text.py \
 - Start in fp32 for stability, then switch to bf16 once gradients look healthy.
 
 ## SatSwinMAE Performance Notes
-- **Loader parallelism**: `train_mae.py` now exposes `--loader_workers`, `--loader_prefetch_factor`, and `--loader_pin_memory` so you can saturate an RTX 3090 once the cubes are light enough. The default `train_mae.sh` sets `--loader_workers 6 --loader_prefetch_factor 4`; lower these on slower disks.
-- **Gradient accumulation**: Use `--grad_accum_steps` to keep an effective large batch while only materializing a handful of windows per step. The launcher currently pairs `--batch_size 4` with `--grad_accum_steps 4` to emulate a batch of 16.
-- **Cache ERA5 cubes**: For sustained throughput, run an offline job that walks `dataset/raw_data/**/*.nc`, extracts `(C,T,H,W)` windows once, and stores them as `.npy`/Zarr chunks on NVMe. Point future training runs at the cached directory by swapping in a dataset wrapper that memory-maps the cubes so PyTorch never re-reads NetCDF or recomputes normalization.
-- **Mixed precision (AMP)**: Pass `--use_amp` to `train_mae.py` once data loading is no longer the bottleneck. The loop now wraps forward/backward passes with `torch.cuda.amp.autocast` and `GradScaler` to cut GPU memory and speed math on Ada/Ampere GPUs.
+- **Loader parallelism**: `train_mae.py` exposes `--loader_workers`, `--loader_prefetch_factor`, `--loader_pin_memory`, and `--loader_persistent_workers`. The launcher now defaults to `--loader_workers 8 --loader_prefetch_factor 6 --loader_persistent_workers` to keep workers warm; dial these down if your disks can’t sustain the throughput.
+- **Gradient accumulation + AMP**: Combine `--batch_size 6 --grad_accum_steps 3` with `--use_amp` (the current `train_mae.sh` setup) to hit a larger effective batch without blowing GPU memory. Mixed precision is handled via `torch.cuda.amp` and `GradScaler`.
+- **Cache ERA5 cubes**: Use `python tools/cache_era5_cubes.py [...] --output_dir /mnt/nvme/cache/train` to build a memmap (`cubes.bin`, `valid_mask.bin`, `meta.json`). Point `train_mae.sh` at the cached paths by exporting `CACHE_TRAIN_DIR=/mnt/nvme/cache/train` and `CACHE_VAL_DIR=/mnt/nvme/cache/val` before launching; `train_mae.py` will automatically switch to the memory-mapped dataset.
+- **CPU affinity**: Every loader worker pins itself to a dedicated core and forces `torch.set_num_threads(1)` to avoid MKL/BLAS contention. For even tighter control, launch the script via `taskset`/`numactl`.
+- **Data locality**: Stage `dataset/raw_data` on a fast SSD or tmpfs before caching or training, e.g. `rsync -a dataset/raw_data/ /mnt/nvme/raw_data/` and then point `CACHE_*_DIR` and `--files` globs at the NVMe path.
 
 
 

@@ -15,9 +15,11 @@ from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
+import numpy as np
 
 from .model import SatSwinMAE
 from .dataset_era5 import ERA5CubeDataset
+from .dataset_cached import CachedCubeMemmapDataset
 
 
 def expand_files(patterns: List[str]) -> List[str]:
@@ -193,10 +195,19 @@ def parse_args():
     ap.add_argument("--no_loader_pin_memory", dest="loader_pin_memory", action="store_false",
                     help="Disable pin_memory to reduce host RAM pressure.")
     ap.set_defaults(loader_pin_memory=True)
+    ap.add_argument("--loader_persistent_workers", dest="loader_persistent_workers", action="store_true",
+                    help="Keep DataLoader workers alive between epochs (default when workers>0).")
+    ap.add_argument("--no_loader_persistent_workers", dest="loader_persistent_workers", action="store_false",
+                    help="Respawn workers every epoch (slower but releases RAM).")
+    ap.set_defaults(loader_persistent_workers=True)
     ap.add_argument("--grad_accum_steps", type=int, default=1,
                     help="Number of steps to accumulate gradients before each optimizer step.")
     ap.add_argument("--use_amp", action="store_true",
                     help="Enable torch.cuda.amp autocast/GradScaler for mixed precision.")
+    ap.add_argument("--cache_train_dir", type=str, default=None,
+                    help="Path to memmap cache (from tools/cache_era5_cubes.py) for training set.")
+    ap.add_argument("--cache_val_dir", type=str, default=None,
+                    help="Path to memmap cache for validation set.")
     
     # MLflow tracking arguments
     ap.add_argument("--mlflow_tracking_uri", type=str, default=None,
@@ -215,9 +226,33 @@ def parse_args():
     return ap.parse_args()
 
 
+def _default_worker_init(worker_id):
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    try:
+        import numpy as _np
+        if hasattr(_np, "seterr"):
+            _np.seterr(all="ignore")
+    except Exception:
+        pass
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    if hasattr(os, "sched_getaffinity") and hasattr(os, "sched_setaffinity"):
+        try:
+            cpus = sorted(os.sched_getaffinity(0))
+            if cpus:
+                target = cpus[worker_id % len(cpus)]
+                os.sched_setaffinity(0, {target})
+        except Exception:
+            pass
+
+
 def make_loader(files, variables, window, stride, batch_size, shuffle,
                 time_start=None, time_end=None, num_workers=2,
-                pin_memory=True, prefetch_factor=2):
+                pin_memory=True, prefetch_factor=2,
+                persistent_workers=True, worker_init_fn=_default_worker_init):
     ds = ERA5CubeDataset(
         files, variables, window, stride,
         time_start=time_start, time_end=time_end,
@@ -244,8 +279,35 @@ def make_loader(files, variables, window, stride, batch_size, shuffle,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
-    if num_workers > 0 and prefetch_factor is not None:
-        loader_kwargs["prefetch_factor"] = prefetch_factor
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["worker_init_fn"] = worker_init_fn
+    return DataLoader(ds, **loader_kwargs)
+
+
+def make_cached_loader(cache_dir, batch_size, shuffle, num_workers, pin_memory,
+                       prefetch_factor, persistent_workers):
+    ds = CachedCubeMemmapDataset(cache_dir)
+    approx_sample_bytes = np.prod(ds.cube_shape) * 4
+    approx_batch_gb = (approx_sample_bytes * batch_size) / (1024 ** 3)
+    print(
+        f"[cached dataset] dir={cache_dir} samples={len(ds)} shape={ds.cube_shape} | "
+        f"~{approx_sample_bytes/1e6:.1f} MB/sample, ~{approx_batch_gb:.2f} GB/batch "
+        f"(workers={num_workers}, prefetch={prefetch_factor or 0}, pin_memory={pin_memory})"
+    )
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["worker_init_fn"] = _default_worker_init
     return DataLoader(ds, **loader_kwargs)
 
 
@@ -327,8 +389,11 @@ def main():
                 "loader_workers": args.loader_workers,
                 "loader_prefetch_factor": args.loader_prefetch_factor,
                 "loader_pin_memory": args.loader_pin_memory,
+                "loader_persistent_workers": args.loader_persistent_workers,
                 "grad_accum_steps": args.grad_accum_steps,
                 "use_amp": args.use_amp,
+                "cache_train_dir": args.cache_train_dir,
+                "cache_val_dir": args.cache_val_dir,
             })
             
             run_training(args)
@@ -363,15 +428,36 @@ def run_training(args):
         num_workers=args.loader_workers,
         pin_memory=args.loader_pin_memory,
         prefetch_factor=args.loader_prefetch_factor,
+        persistent_workers=args.loader_persistent_workers if args.loader_workers > 0 else False,
     )
-    train_loader = make_loader(
-        train_files, args.variables, window, stride, args.batch_size, True,
-        time_start=args.time_start, time_end=args.time_end, **loader_opts
-    )
-    val_loader = make_loader(
-        val_files, args.variables, window, stride, args.batch_size, False,
-        time_start=args.time_start, time_end=args.time_end, **loader_opts
-    )
+
+    use_cache = args.cache_train_dir or args.cache_val_dir
+    if use_cache:
+        if not (args.cache_train_dir and args.cache_val_dir):
+            raise SystemExit("Please provide both --cache_train_dir and --cache_val_dir when using cached data.")
+        train_loader = make_cached_loader(
+            args.cache_train_dir, args.batch_size, True,
+            **loader_opts
+        )
+        val_loader = make_cached_loader(
+            args.cache_val_dir, args.batch_size, False,
+            **loader_opts
+        )
+        cache_window = getattr(train_loader.dataset, "window", None)
+        if isinstance(cache_window, dict):
+            window = cache_window
+        cache_stride = getattr(train_loader.dataset, "stride", None)
+        if isinstance(cache_stride, dict):
+            stride = cache_stride
+    else:
+        train_loader = make_loader(
+            train_files, args.variables, window, stride, args.batch_size, True,
+            time_start=args.time_start, time_end=args.time_end, **loader_opts
+        )
+        val_loader = make_loader(
+            val_files, args.variables, window, stride, args.batch_size, False,
+            time_start=args.time_start, time_end=args.time_end, **loader_opts
+        )
 
     in_chans = int(train_loader.dataset.C)
     if hasattr(val_loader.dataset, "C"):
@@ -426,6 +512,7 @@ def run_training(args):
     sched = CosineAnnealingLR(opt, T_max=args.epochs)
     os.makedirs(args.out_dir, exist_ok=True)
 
+    global_step = 0
     for epoch in range(1, args.epochs + 1):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
@@ -436,8 +523,11 @@ def run_training(args):
         accum_steps = max(1, args.grad_accum_steps)
         opt.zero_grad()
         num_batches = len(train_loader)
+        prev_step_end = time.perf_counter()
 
         for step, batch in enumerate(pbar, start=1):
+            step_start = time.perf_counter()
+            loader_wait = step_start - prev_step_end
             if not first_batch_logged:
                 latency = time.perf_counter() - first_batch_t0
                 pbar.write(f"[loader] First batch ready after {latency:.1f}s "
@@ -467,6 +557,23 @@ def run_training(args):
             
             train_loss_sum += loss_value
             train_batch_count += 1
+            global_step += 1
+            step_end = time.perf_counter()
+            compute_time = step_end - step_start
+            step_time = max(step_end - prev_step_end, 1e-9)
+            gpu_active_ratio = compute_time / step_time
+            prev_step_end = step_end
+            if not args.disable_mlflow:
+                mlflow.log_metrics(
+                    {
+                        "train_step_loss": loss_value,
+                        "train_step_lr": opt.param_groups[0]["lr"],
+                        "loader_wait_s": loader_wait,
+                        "compute_s": compute_time,
+                        "gpu_active_ratio": gpu_active_ratio,
+                    },
+                    step=global_step,
+                )
 
         # Calculate average training loss
         avg_train_loss = train_loss_sum / train_batch_count if train_batch_count > 0 else float('nan')
