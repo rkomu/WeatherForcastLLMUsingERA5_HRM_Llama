@@ -15,7 +15,13 @@ from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
+from mlflow.models.signature import infer_signature
 import numpy as np
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 from .model import SatSwinMAE
 from .dataset_era5 import ERA5CubeDataset
@@ -331,6 +337,68 @@ def unpack_and_move(batch, device):
         return data, valid
     raise TypeError(f"Unsupported batch type: {type(batch)}")
 
+
+def log_reconstruction_preview_mlflow(epoch, sample_input, sample_recon, channel_names=None):
+    """
+    Log side-by-side ground-truth vs reconstruction slices for a single sample to MLflow.
+    """
+    if plt is None:
+        if not getattr(log_reconstruction_preview_mlflow, "_warned", False):
+            print("[mlflow] matplotlib not found; skipping reconstruction previews.")
+            log_reconstruction_preview_mlflow._warned = True
+        return
+    if mlflow.active_run() is None:
+        return
+
+    sample_input = sample_input.detach().float().cpu().numpy()
+    sample_recon = sample_recon.detach().float().cpu().numpy()
+    if sample_input.ndim != 4 or sample_recon.shape != sample_input.shape:
+        return
+
+    C, T, H, W = sample_input.shape
+    if C == 0 or T == 0:
+        return
+
+    num_channels = int(min(3, C))
+    num_times = int(min(3, T))
+    channel_indices = np.linspace(0, C - 1, num_channels, dtype=int)
+    time_indices = np.linspace(0, T - 1, num_times, dtype=int)
+
+    fig, axes = plt.subplots(num_channels, num_times * 2, figsize=(4 * num_times * 2, 3 * num_channels))
+    if num_channels == 1:
+        axes = axes.reshape(1, -1)
+
+    for row_idx, ch_idx in enumerate(channel_indices):
+        channel_label = None
+        if channel_names and ch_idx < len(channel_names):
+            channel_label = str(channel_names[ch_idx])
+        channel_label = channel_label or f"ch{ch_idx}"
+        for time_pos, t_idx in enumerate(time_indices):
+            truth = np.nan_to_num(sample_input[ch_idx, t_idx])
+            recon = np.nan_to_num(sample_recon[ch_idx, t_idx])
+            vmin = np.nanmin(np.stack([truth, recon]))
+            vmax = np.nanmax(np.stack([truth, recon]))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+                vmin = float(np.nanmin(truth))
+                vmax = float(np.nanmax(truth)) + 1e-6
+            truth_ax = axes[row_idx, time_pos * 2]
+            recon_ax = axes[row_idx, time_pos * 2 + 1]
+            for ax, img, suffix in ((truth_ax, truth, "target"), (recon_ax, recon, "recon")):
+                im = ax.imshow(img, cmap="coolwarm", vmin=vmin, vmax=vmax)
+                ax.set_axis_off()
+                ax.set_title(f"{channel_label} t={int(t_idx)} {suffix}", fontsize=9)
+            # add colorbar on the reconstruction plot for clarity
+            fig.colorbar(im, ax=recon_ax, fraction=0.046, pad=0.01)
+
+    fig.suptitle(f"SatSwinMAE reconstruction preview — epoch {epoch}", fontsize=12)
+    fig.tight_layout()
+    try:
+        mlflow.log_figure(fig, f"reconstructions/epoch_{epoch:04d}.png")
+    except Exception as exc:
+        print(f"[mlflow] Failed to log reconstruction preview: {exc}")
+    finally:
+        plt.close(fig)
+
 def main():
     args = parse_args()
 
@@ -493,6 +561,26 @@ def run_training(args):
         mask_ratio=args.mask_ratio
     ).to(args.device)
 
+    mlflow_input_example = None
+    mlflow_signature = None
+    if not args.disable_mlflow:
+        example_tensor = torch.zeros(
+            1,
+            in_chans,
+            window["T"],
+            window["H"],
+            window["W"],
+            dtype=torch.float32,
+        )
+        mlflow_input_example = example_tensor.numpy()
+        prev_mode = model.training
+        model.eval()
+        with torch.no_grad():
+            example_output = model(example_tensor.to(args.device), compute_loss=False).cpu().numpy()
+        mlflow_signature = infer_signature(mlflow_input_example, example_output)
+        if prev_mode:
+            model.train()
+
     # Log model info
     if not args.disable_mlflow:
         total_params = sum(p.numel() for p in model.parameters())
@@ -580,11 +668,23 @@ def run_training(args):
 
         model.eval()
         vtotal = 0.0
+        logged_preview = False
         with torch.no_grad():
             for batch in val_loader:
                 data, valid = unpack_and_move(batch, args.device)
                 with autocast(enabled=amp_enabled):
-                    loss, _ = model(data, compute_loss=True, valid_mask=valid)
+                    loss, recon = model(data, compute_loss=True, valid_mask=valid)
+                if (not logged_preview) and (not args.disable_mlflow) and data.size(0) > 0:
+                    try:
+                        log_reconstruction_preview_mlflow(
+                            epoch,
+                            data[0],
+                            recon[0],
+                            channel_names=chan_names
+                        )
+                        logged_preview = True
+                    except Exception as exc:
+                        print(f"[mlflow] Failed to prepare reconstruction preview: {exc}")
                 vtotal += loss.item() * data.size(0)
         # print(f"vtotal: {vtotal} , len(val_loader.dataset): {len(val_loader.dataset)}")
         if len(val_loader.dataset) > 0:
@@ -621,7 +721,9 @@ def run_training(args):
                     mlflow.pytorch.log_model(
                         model, 
                         f"model_epoch_{epoch}",
-                        registered_model_name=f"{args.mlflow_experiment_name}_model" if epoch == args.epochs else None
+                        registered_model_name=f"{args.mlflow_experiment_name}_model" if epoch == args.epochs else None,
+                        signature=mlflow_signature,
+                        input_example=mlflow_input_example,
                     )
                     # Log the checkpoint file
                     mlflow.log_artifact(checkpoint_path, "checkpoints")
