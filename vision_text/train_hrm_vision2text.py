@@ -107,7 +107,11 @@ def parse_args():
     ap.add_argument('--time_end', type=str, default=None)
     ap.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     ap.add_argument('--out_dir', type=str, default='checkpoints_v2t')
-    ap.add_argument('--caption_csv', type=str, default=None, help="CSV with 'date' and 'event description' columns", required=True)
+    ap.add_argument('--caption_csv', type=str, default=None, help="CSV with 'date' and caption text columns", required=True)
+    ap.add_argument('--caption_location_col', type=str, default=None,
+                    help="Optional location column name used to filter captions")
+    ap.add_argument('--caption_location_values', nargs='+', default=None,
+                    help="Allowed location values (case-insensitive) when filtering captions")
     ap.add_argument('--drop_if_no_caption', action='store_true', help="Drop windows with no caption for their date")
     ap.add_argument('--anchor', type=str, default='last', choices=['first','middle','last'], help="Which timestep to use to compute the date")
     ap.add_argument('--num_workers', type=int, default=0)
@@ -375,6 +379,8 @@ def run_training(args):
         max_len=128,
         drop_if_no_caption=args.drop_if_no_caption,
         anchor=args.anchor,
+        location_col=args.caption_location_col,
+        location_values=args.caption_location_values,
     )
     pad_id = (getattr(tokenizer, 'pad_token_id', None)
             if getattr(tokenizer, 'pad_token_id', None) is not None

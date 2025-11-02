@@ -28,6 +28,16 @@ from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import logging
+import sys
+
+# --- logger setup ---
+logger = logging.getLogger("vision2text")
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s:%(name)s: %(message)s", "%H:%M:%S"))
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 # NEW: QLoRA imports
 from transformers import BitsAndBytesConfig
@@ -100,12 +110,41 @@ def _normalize_date_key(x) -> pd.Timestamp:
 
 def load_captions(csv_path: Optional[str],
                   date_col_override: Optional[str] = None,
-                  text_col_override: Optional[str] = None) -> CaptionTable:
+                  text_col_override: Optional[str] = None,
+                  location_col_override: Optional[str] = None,
+                  location_values: Optional[List[str]] = None) -> CaptionTable:
     if not csv_path:
         return CaptionTable({}, {}, "none")
 
     df = pd.read_csv(csv_path)
     cols_lower = {c.lower(): c for c in df.columns}
+
+    # Optional location filtering (case-insensitive)
+    if location_values:
+        loc_col = None
+        if location_col_override:
+            if location_col_override not in df.columns:
+                raise ValueError(
+                    f"{csv_path} missing overridden location column: {location_col_override!r}. "
+                    f"Found: {list(df.columns)}"
+                )
+            loc_col = location_col_override
+        else:
+            candidate_loc_names = ["location", "region", "city", "area", "site"]
+            loc_col = next((cols_lower[k] for k in candidate_loc_names if k in cols_lower), None)
+            if loc_col is None:
+                raise ValueError(
+                    f"{csv_path} requires --caption_location_col when using --caption_location_values. "
+                    f"Found columns: {list(df.columns)}"
+                )
+        values_norm = {str(v).strip().casefold() for v in location_values}
+        filtered = df[df[loc_col].astype(str).str.strip().str.casefold().isin(values_norm)]
+        if filtered.empty:
+            raise ValueError(
+                f"{csv_path} contains no rows matching {loc_col!r} in {sorted(values_norm)}"
+            )
+        df = filtered
+        cols_lower = {c.lower(): c for c in df.columns}
 
     # Explicit overrides
     if date_col_override and text_col_override:
@@ -118,7 +157,13 @@ def load_captions(csv_path: Optional[str],
         by_date = {}
         for _, row in df.iterrows():
             key = _normalize_date_key(row[dcol])
-            by_date[key] = str(row[tcol]).strip()
+            text = str(row[tcol]).strip()
+            if not text:
+                continue
+            if key in by_date and by_date[key]:
+                by_date[key] = f"{by_date[key]}\n{text}"
+            else:
+                by_date[key] = text
         return CaptionTable({}, by_date, "date")
 
     # Auto: path/caption
@@ -142,7 +187,13 @@ def load_captions(csv_path: Optional[str],
         by_date = {}
         for _, row in df.iterrows():
             key = _normalize_date_key(row[date_col])
-            by_date[key] = str(row[text_col]).strip()
+            text = str(row[text_col]).strip()
+            if not text:
+                continue
+            if key in by_date and by_date[key]:
+                by_date[key] = f"{by_date[key]}\n{text}"
+            else:
+                by_date[key] = text
         return CaptionTable({}, by_date, "date")
 
     # Better error
@@ -244,7 +295,7 @@ class ERA5CaptionWindows(Dataset):
                     "index": i,
                 }
                 self.samples.append((i, token_ids, meta))
-            print(f"[captions] layout=path  applied 1 caption to {len(self.samples)} windows.")
+            logger.info("[captions] layout=path  applied 1 caption to %d windows.", len(self.samples))
             return
 
         # layout == "date"
@@ -284,8 +335,8 @@ class ERA5CaptionWindows(Dataset):
             if cap is not None:
                 matched += 1
 
-        print(f"[captions] layout=date  matched={matched} / {len(self.samples)} usable windows "
-              f"(drop_if_no_caption={self.drop})")
+        logger.info("[captions] layout=date  matched=%d / %d usable windows "
+              "(drop_if_no_caption=%s)", matched, len(self.samples), self.drop)
 
     def __len__(self):
         return len(self.samples)
@@ -386,10 +437,17 @@ def build_argparser():
     ap.add_argument("--split_mode", type=str, default="chronological", choices=["chronological", "random"])
     ap.add_argument("--seed", type=int, default=42)
 
-    ap.add_argument("--caption_csv", type=str, default=None)
+    ap.add_argument("--caption_csv", type=str, default=None,
+                    help="CSV with caption metadata (date/path based)")
     ap.add_argument("--drop_if_no_caption", action="store_true")
-    ap.add_argument("--caption_date_col", type=str, default=None)
-    ap.add_argument("--caption_text_col", type=str, default=None)
+    ap.add_argument("--caption_date_col", type=str, default=None,
+                    help="Explicit date column name in caption CSV")
+    ap.add_argument("--caption_text_col", type=str, default=None,
+                    help="Explicit text column name in caption CSV")
+    ap.add_argument("--caption_location_col", type=str, default=None,
+                    help="Optional location column used to filter caption rows")
+    ap.add_argument("--caption_location_values", nargs="+", default=None,
+                    help="Case-insensitive list of allowed location values")
     ap.add_argument("--anchor", type=str, choices=["first", "middle", "last"], default="first")
 
     # training
@@ -610,7 +668,7 @@ def eval_and_log_predictions(model: "TinyLlamaV2T",
             f.write("## Top matches\n\n" + "\n".join(_fmt(x) for x in top) + "\n\n")
             f.write("## Worst matches\n\n" + "\n".join(_fmt(x) for x in worst) + "\n")
     except Exception as e:
-        print(f"[report] Warning: failed to create markdown report: {e}")
+        logger.warning("failed to create markdown report: %s", e)
 
     # Log to MLflow
     if use_mlflow and _MLFLOW_AVAILABLE:
@@ -620,7 +678,7 @@ def eval_and_log_predictions(model: "TinyLlamaV2T",
             if os.path.exists(md_path):
                 mlflow.log_artifact(md_path, artifact_path="eval")
         except Exception as e:
-            print(f"[MLflow] Warning: failed to log eval artifacts: {e}")
+            logger.warning("failed to log eval artifacts: %s", e)
 
     return metrics
 
@@ -654,7 +712,7 @@ def log_runtime_to_mlflow(args, model, prefixer, lm, train_files, val_files, in_
             "prefixer_params": count_params(prefixer, trainable_only=False),
         })
     except Exception as e:
-        print(f"[MLflow] Warning: failed to log runtime info: {e}")
+        logger.warning("failed to log runtime info: %s", e)
 
 
 # ----------------- main -----------------
@@ -750,7 +808,7 @@ def main():
         raise SystemExit(f"Need at least 2 files to split train/val; got {len(all_files)}")
 
     train_files, val_files = auto_split_files(all_files, args.val_ratio, args.split_mode, args.seed)
-    print(f"[split] train_files={len(train_files)}  val_files={len(val_files)}")
+    logger.info("[split] train_files=%d  val_files=%d", len(train_files), len(val_files))
 
     window = {"T": args.window_T, "H": args.window_H, "W": args.window_W}
     stride = {"T": args.stride_T, "H": args.stride_H, "W": args.stride_W}
@@ -818,10 +876,13 @@ def main():
     captions = load_captions(
         args.caption_csv,
         date_col_override=args.caption_date_col,
-        text_col_override=args.caption_text_col
+        text_col_override=args.caption_text_col,
+        location_col_override=args.caption_location_col,
+        location_values=args.caption_location_values
     )
 
     # Build loaders
+    logger.info("Building DataLoaders (this may open ERA5 files and take time)")
     train_loader = make_loader(
         train_files, args.variables, window, stride, args.batch_size, True,
         time_start=args.time_start, time_end=args.time_end,
@@ -838,11 +899,11 @@ def main():
     )
 
     # MAE & adapter
-    print(train_loader)
+    logger.info("train_loader=%s", train_loader)
     in_chans = int(train_loader.dataset.inner.C)  # type: ignore[attr-defined]
 
     c, v, y, m = next(iter(train_loader))
-    print("sample shapes:", c.shape, v.shape, y.shape)  # expect (B,C,T,H,W), (B,T,H,W), (B,L)
+    logger.info("sample shapes: %s %s %s", c.shape, v.shape, y.shape)  # expect (B,C,T,H,W), (B,T,H,W), (B,L)
 
     # --- Load MAE checkpoint, infer correct Swin 3D window sizes, then build model accordingly ---
     # Safer torch.load regarding future weights_only default flip:
@@ -855,7 +916,7 @@ def main():
     ws = _infer_swin3d_windows_from_ckpt(ckpt)
     if ws is None:
         ws = (2, 8, 8)
-    print(f"[SatSwinMAE] Using window_size={ws} (inferred from checkpoint)")
+    logger.info("[SatSwinMAE] Using window_size=%s (inferred from checkpoint)", ws)
 
     mae = SatSwinMAE(
         in_chans=in_chans, out_chans=in_chans,
@@ -867,8 +928,7 @@ def main():
     try:
         missing, unexpected = mae.load_state_dict(ckpt, strict=False)
     except RuntimeError as e:
-        print(f"[SatSwinMAE] load_state_dict encountered mismatch: {e}\n"
-              f"[SatSwinMAE] Retrying after stripping relative-position keys ...")
+        logger.warning("[SatSwinMAE] load_state_dict encountered mismatch: %s; retrying after stripping relative-position keys", e)
         ckpt2 = _strip_relpos_keys(ckpt)
         missing, unexpected = mae.load_state_dict(ckpt2, strict=False)
 
@@ -954,10 +1014,10 @@ def main():
 
     # If test-only, run a single eval + GT/pred logging and exit
     if args.test_only:
-        print("[test_only] Running validation evaluation with GT/pred logging ...")
+        logger.info("[test_only] Running validation evaluation with GT/pred logging ...")
         val_loss = evaluate_loss(model, val_loader, args.device)
         ppl = math.exp(val_loss) if val_loss < 50 else float("inf")
-        print(f"[eval] loss={val_loss:.4f}  ppl={ppl:.2f}")
+        logger.info("[eval] loss=%.4f  ppl=%.2f", val_loss, ppl)
         if use_mlflow:
             mlflow.log_metrics({"val_loss": val_loss, "val_ppl": ppl}, step=0)
         _ = eval_and_log_predictions(model, val_loader, tok, args, args.device, epoch_or_step=0, use_mlflow=use_mlflow)
@@ -1007,10 +1067,10 @@ def main():
                         "train_batch_grad_norm": float(grad_norm)
                     }, step=global_step)
                 except Exception as e:
-                    print(f"[MLflow] Warning: batch metric log failed: {e}")
+                    logger.warning("batch metric log failed: %s", e)
 
         avg_train = running / max(1, count_batches)
-        print(f"Epoch {epoch}/{args.epochs}  train_loss={avg_train:.4f}")
+        logger.info("Epoch %d/%d  train_loss=%.4f", epoch, args.epochs, avg_train)
 
         # Log train loss
         if use_mlflow:
@@ -1023,7 +1083,7 @@ def main():
             try:
                 mlflow.log_artifact(ckpt_path, artifact_path="checkpoints")
             except Exception as e:
-                print(f"[MLflow] Warning: failed to log checkpoint: {e}")
+                logger.warning("failed to log checkpoint: %s", e)
 
         # If QLoRA, also save LoRA adapter each epoch (small)
         if args.use_qlora:
@@ -1033,14 +1093,14 @@ def main():
                 model.lm.save_pretrained(lora_dir)
                 tok.save_pretrained(lora_dir)
             except Exception as e:
-                print(f"[LoRA] Warning: failed to save LoRA at epoch {epoch}: {e}")
+                logger.warning("[LoRA] failed to save LoRA at epoch %d: %s", epoch, e)
 
         # ---------- EVAL ----------
         do_eval = (args.eval_every > 0 and (epoch % args.eval_every == 0)) or (epoch == args.epochs)
         if do_eval:
             val_loss = evaluate_loss(model, val_loader, args.device)
             ppl = math.exp(val_loss) if val_loss < 50 else float("inf")
-            print(f"[eval] epoch={epoch}  val_loss={val_loss:.4f}  ppl={ppl:.2f}")
+            logger.info("[eval] epoch=%d  val_loss=%.4f  ppl=%.2f", epoch, val_loss, ppl)
 
             # Track best
             best_val = min(best_val, val_loss)
@@ -1059,14 +1119,14 @@ def main():
                         text_blob = "\n\n".join([f"### Sample {i+1}\n{t}" for i, t in enumerate(gens)])
                         mlflow.log_text(text_blob, artifact_file=f"samples/epoch_{epoch}.md")
                     except Exception as e:
-                        print(f"[MLflow] Warning: failed to log generations: {e}")
+                        logger.warning("failed to log generations: %s", e)
 
         # Optional: log final model (adapter only)
         if use_mlflow and (epoch == args.epochs) and (args.log_model_every_n_epochs == 0):
             try:
                 mlflow.log_artifact(ckpt_path, artifact_path="checkpoints")
             except Exception as e:
-                print(f"[MLflow] Warning: failed to log final checkpoint: {e}")
+                logger.warning("failed to log final checkpoint: %s", e)
 
     # Save final adapters
     final_path = os.path.join(args.out_dir, "adapter_final.pt")
@@ -1079,15 +1139,16 @@ def main():
             model.lm.save_pretrained(lora_final_dir)
             tok.save_pretrained(lora_final_dir)
         except Exception as e:
-            print(f"[LoRA] Warning: failed to save final LoRA: {e}")
+            logger.warning("[LoRA] failed to save final LoRA: %s", e)
 
     if use_mlflow:
         try:
             mlflow.log_artifact(final_path, artifact_path="checkpoints")
         except Exception as e:
-            print(f"[MLflow] Warning: failed to log final adapter: {e}")
+            logger.warning("[MLflow] Warning: failed to log final adapter: %s", e)
         mlflow.end_run()
 
 
 if __name__ == "__main__":
+    logger.info("Starting training script")
     main()

@@ -4,7 +4,8 @@ python3 -m vision_text.train_hrm_vision2text \
   --mae_ckpt checkpoints/satswinmae_epoch10.pt \
   --files ./dataset/raw_data/**/*.nc \
   --variables u10 v10 r sp ssrd t cp \
-  --caption_csv ./dataset/weather/weather_august_2024.csv \
+  --caption_csv ./dataset/weather/tokyo_weather_2023-2025.csv \
+  --caption_location_col location --caption_location_values Tokyo \
   --time_start "2024-08-01" --time_end "2024-08-31" \
   --eval_every 1 --eval_max_samples 64 --eval_log_samples 10 \
   --window_T 8 --window_H 64 --window_W 64 \

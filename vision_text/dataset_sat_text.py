@@ -56,6 +56,7 @@ def expand_files(patterns: List[str]) -> List[str]:
 class ERA5CaptionDatasetCSV(Dataset):
     """
     Use a CSV that has at least two columns: `date` and `event description` (or `event_description`).
+    Optionally, provide a location column/value filter to focus on a specific region or station.
     For each ERA5 window, we take the **anchor time** = the last timestep in the window,
     convert to UTC date (YYYY-MM-DD), and pair that window with *all* captions from that date.
     This expands the dataset length so each (window, caption) is a training item.
@@ -64,6 +65,7 @@ class ERA5CaptionDatasetCSV(Dataset):
         csv_path: path to the CSV
         drop_if_no_caption: if True, skip windows with no matching captions; else fall back to auto caption
         anchor: "last" (default), "first", or "middle" timestep of the window to compute the date
+        location_values: if provided, keep only CSV rows whose `location_col` matches one of these values
     """
     def __init__(
         self,
@@ -75,6 +77,8 @@ class ERA5CaptionDatasetCSV(Dataset):
         max_len: int = 128,
         drop_if_no_caption: bool = True,
         anchor: str = "last",
+        location_col: Optional[str] = None,
+        location_values: Optional[List[str]] = None,
     ):
         all_files = expand_files(files)
         self.inner = ERA5CubeDataset(all_files, variables, window, stride,
@@ -88,6 +92,34 @@ class ERA5CaptionDatasetCSV(Dataset):
         df = pd.read_csv(csv_path)
         # normalize column names
         cols = {c.lower().strip(): c for c in df.columns}
+
+        if location_values:
+            loc_col = None
+            if location_col:
+                if location_col not in df.columns:
+                    raise ValueError(
+                        f"{csv_path} missing overridden location column: {location_col!r}. "
+                        f"Found: {list(df.columns)}"
+                    )
+                loc_col = location_col
+            else:
+                for cand in ["location", "region", "city", "area", "site"]:
+                    if cand in cols:
+                        loc_col = cols[cand]
+                        break
+                if loc_col is None:
+                    raise ValueError(
+                        f"{csv_path} requires location_col when using location_values. Columns: {list(df.columns)}"
+                    )
+            values_norm = {str(v).strip().casefold() for v in location_values}
+            filtered = df[df[loc_col].astype(str).str.strip().str.casefold().isin(values_norm)]
+            if filtered.empty:
+                raise ValueError(
+                    f"{csv_path} contains no rows matching {loc_col!r} in {sorted(values_norm)}"
+                )
+            df = filtered
+            cols = {c.lower().strip(): c for c in df.columns}
+
         if "date" not in cols:
             raise ValueError("CSV must have a 'date' column.")
         # accept either 'event description' or 'event_description'

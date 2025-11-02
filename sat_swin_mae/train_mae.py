@@ -1,8 +1,10 @@
 # sat_swin_mae/train_mae.py
+import copy
 import os
 import argparse
 import glob
 import random
+import time
 from typing import List
 
 import torch
@@ -10,12 +12,21 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 import mlflow
 import mlflow.pytorch
+from mlflow.models.signature import infer_signature
+import numpy as np
+
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
 
 from .model import SatSwinMAE
 from .dataset_era5 import ERA5CubeDataset
+from .dataset_cached import CachedCubeMemmapDataset
 
 
 def expand_files(patterns: List[str]) -> List[str]:
@@ -182,6 +193,50 @@ def parse_args():
                     help="Start of time range (e.g., '2000-01-01' or '2000-01-01 06:00'). Inclusive.")
     ap.add_argument("--time_end",   type=str, default=None,
                     help="End of time range (e.g., '2000-08-31'). Inclusive.")
+    ap.add_argument("--loader_workers", type=int, default=2,
+                    help="Number of DataLoader worker processes. Set to 0 to debug single-process loading.")
+    ap.add_argument("--loader_prefetch_factor", type=int, default=2,
+                    help="prefetch_factor for each worker. Ignored if workers=0.")
+    ap.add_argument("--loader_pin_memory", dest="loader_pin_memory", action="store_true",
+                    help="Pin CPU tensors before moving to GPU (default).")
+    ap.add_argument("--no_loader_pin_memory", dest="loader_pin_memory", action="store_false",
+                    help="Disable pin_memory to reduce host RAM pressure.")
+    ap.set_defaults(loader_pin_memory=True)
+    ap.add_argument("--loader_persistent_workers", dest="loader_persistent_workers", action="store_true",
+                    help="Keep DataLoader workers alive between epochs (default when workers>0).")
+    ap.add_argument("--no_loader_persistent_workers", dest="loader_persistent_workers", action="store_false",
+                    help="Respawn workers every epoch (slower but releases RAM).")
+    ap.set_defaults(loader_persistent_workers=True)
+    ap.add_argument("--grad_accum_steps", type=int, default=1,
+                    help="Number of steps to accumulate gradients before each optimizer step.")
+    ap.add_argument("--use_amp", action="store_true",
+                    help="Enable torch.cuda.amp autocast/GradScaler for mixed precision.")
+    ap.add_argument("--cache_train_dir", type=str, default=None,
+                    help="Path to memmap cache (from tools/cache_era5_cubes.py) for training set.")
+    ap.add_argument("--cache_val_dir", type=str, default=None,
+                    help="Path to memmap cache for validation set.")
+    ap.add_argument("--use_optuna", action="store_true",
+                    help="Enable Optuna hyperparameter tuning for learning rate and mask ratio.")
+    ap.add_argument("--optuna_trials", type=int, default=10,
+                    help="Number of Optuna trials to run when --use_optuna is set.")
+    ap.add_argument("--optuna_timeout", type=int, default=None,
+                    help="Optional timeout (in seconds) for the Optuna study.")
+    ap.add_argument("--optuna_study_name", type=str, default="sat_swinmae_optuna",
+                    help="Name for the Optuna study (used when storage is provided).")
+    ap.add_argument("--optuna_storage", type=str, default=None,
+                    help="Optuna storage URI (e.g., sqlite:///study.db). Enables study persistence.")
+    ap.add_argument("--optuna_direction", type=str, choices=["minimize", "maximize"], default="minimize",
+                    help="Optimization direction for the Optuna study. For loss, keep 'minimize'.")
+    ap.add_argument("--optuna_lr_min", type=float, default=1e-5,
+                    help="Lower bound for learning rate search space.")
+    ap.add_argument("--optuna_lr_max", type=float, default=5e-4,
+                    help="Upper bound for learning rate search space.")
+    ap.add_argument("--optuna_lr_log", action="store_true",
+                    help="Sample learning rates on a log scale when tuning with Optuna.")
+    ap.add_argument("--optuna_mask_min", type=float, default=0.5,
+                    help="Lower bound for mask ratio search space.")
+    ap.add_argument("--optuna_mask_max", type=float, default=0.95,
+                    help="Upper bound for mask ratio search space.")
     
     # MLflow tracking arguments
     ap.add_argument("--mlflow_tracking_uri", type=str, default=None,
@@ -200,7 +255,33 @@ def parse_args():
     return ap.parse_args()
 
 
-def make_loader(files, variables, window, stride, batch_size, shuffle, time_start=None, time_end=None):
+def _default_worker_init(worker_id):
+    try:
+        torch.set_num_threads(1)
+    except Exception:
+        pass
+    try:
+        import numpy as _np
+        if hasattr(_np, "seterr"):
+            _np.seterr(all="ignore")
+    except Exception:
+        pass
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    if hasattr(os, "sched_getaffinity") and hasattr(os, "sched_setaffinity"):
+        try:
+            cpus = sorted(os.sched_getaffinity(0))
+            if cpus:
+                target = cpus[worker_id % len(cpus)]
+                os.sched_setaffinity(0, {target})
+        except Exception:
+            pass
+
+
+def make_loader(files, variables, window, stride, batch_size, shuffle,
+                time_start=None, time_end=None, num_workers=2,
+                pin_memory=True, prefetch_factor=2,
+                persistent_workers=True, worker_init_fn=_default_worker_init):
     ds = ERA5CubeDataset(
         files, variables, window, stride,
         time_start=time_start, time_end=time_end,
@@ -212,8 +293,51 @@ def make_loader(files, variables, window, stride, batch_size, shuffle, time_star
             f"Shapes T/H/W={ds.T}/{ds.H}/{ds.W}, window={window}, stride={stride}, "
             f"time_start={time_start}, time_end={time_end}"
         )
-    print(f"[dataset] T/H/W={ds.T}/{ds.H}/{ds.W}, C={ds.C}, windows={n}")
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=2, pin_memory=True)
+    approx_sample_bytes = ds.C * window["T"] * window["H"] * window["W"] * 4
+    approx_batch_gb = (approx_sample_bytes * batch_size) / (1024 ** 3)
+    prefetch = prefetch_factor if (num_workers > 0 and prefetch_factor is not None) else 0
+    print(
+        f"[dataset] T/H/W={ds.T}/{ds.H}/{ds.W}, C={ds.C}, windows={n} | "
+        f"~{approx_sample_bytes/1e6:.1f} MB/sample, ~{approx_batch_gb:.2f} GB/batch "
+        f"(workers={num_workers}, prefetch={prefetch}, pin_memory={pin_memory})"
+    )
+
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["worker_init_fn"] = worker_init_fn
+    return DataLoader(ds, **loader_kwargs)
+
+
+def make_cached_loader(cache_dir, batch_size, shuffle, num_workers, pin_memory,
+                       prefetch_factor, persistent_workers):
+    ds = CachedCubeMemmapDataset(cache_dir)
+    approx_sample_bytes = np.prod(ds.cube_shape) * 4
+    approx_batch_gb = (approx_sample_bytes * batch_size) / (1024 ** 3)
+    print(
+        f"[cached dataset] dir={cache_dir} samples={len(ds)} shape={ds.cube_shape} | "
+        f"~{approx_sample_bytes/1e6:.1f} MB/sample, ~{approx_batch_gb:.2f} GB/batch "
+        f"(workers={num_workers}, prefetch={prefetch_factor or 0}, pin_memory={pin_memory})"
+    )
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    if num_workers > 0:
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+        loader_kwargs["persistent_workers"] = persistent_workers
+        loader_kwargs["worker_init_fn"] = _default_worker_init
+    return DataLoader(ds, **loader_kwargs)
 
 
 def unpack_and_move(batch, device):
@@ -236,69 +360,254 @@ def unpack_and_move(batch, device):
         return data, valid
     raise TypeError(f"Unsupported batch type: {type(batch)}")
 
+
+def log_reconstruction_preview_mlflow(epoch, sample_input, sample_recon, channel_names=None):
+    """
+    Log side-by-side ground-truth vs reconstruction slices for a single sample to MLflow.
+    """
+    if plt is None:
+        if not getattr(log_reconstruction_preview_mlflow, "_warned", False):
+            print("[mlflow] matplotlib not found; skipping reconstruction previews.")
+            log_reconstruction_preview_mlflow._warned = True
+        return
+    if mlflow.active_run() is None:
+        return
+
+    sample_input = sample_input.detach().float().cpu().numpy()
+    sample_recon = sample_recon.detach().float().cpu().numpy()
+    if sample_input.ndim != 4 or sample_recon.shape != sample_input.shape:
+        return
+
+    C, T, H, W = sample_input.shape
+    if C == 0 or T == 0:
+        return
+
+    num_channels = int(min(3, C))
+    num_times = int(min(3, T))
+    channel_indices = np.linspace(0, C - 1, num_channels, dtype=int)
+    time_indices = np.linspace(0, T - 1, num_times, dtype=int)
+
+    fig, axes = plt.subplots(num_channels, num_times * 2, figsize=(4 * num_times * 2, 3 * num_channels))
+    if num_channels == 1:
+        axes = axes.reshape(1, -1)
+
+    for row_idx, ch_idx in enumerate(channel_indices):
+        channel_label = None
+        if channel_names and ch_idx < len(channel_names):
+            channel_label = str(channel_names[ch_idx])
+        channel_label = channel_label or f"ch{ch_idx}"
+        for time_pos, t_idx in enumerate(time_indices):
+            truth = np.nan_to_num(sample_input[ch_idx, t_idx])
+            recon = np.nan_to_num(sample_recon[ch_idx, t_idx])
+            vmin = np.nanmin(np.stack([truth, recon]))
+            vmax = np.nanmax(np.stack([truth, recon]))
+            if not np.isfinite(vmin) or not np.isfinite(vmax) or vmin == vmax:
+                vmin = float(np.nanmin(truth))
+                vmax = float(np.nanmax(truth)) + 1e-6
+            truth_ax = axes[row_idx, time_pos * 2]
+            recon_ax = axes[row_idx, time_pos * 2 + 1]
+            for ax, img, suffix in ((truth_ax, truth, "target"), (recon_ax, recon, "recon")):
+                im = ax.imshow(img, cmap="coolwarm", vmin=vmin, vmax=vmax)
+                ax.set_axis_off()
+                ax.set_title(f"{channel_label} t={int(t_idx)} {suffix}", fontsize=9)
+            # add colorbar on the reconstruction plot for clarity
+            fig.colorbar(im, ax=recon_ax, fraction=0.046, pad=0.01)
+
+    fig.suptitle(f"SatSwinMAE reconstruction preview — epoch {epoch}", fontsize=12)
+    fig.tight_layout()
+    try:
+        mlflow.log_figure(fig, f"reconstructions/epoch_{epoch:04d}.png")
+    except Exception as exc:
+        print(f"[mlflow] Failed to log reconstruction preview: {exc}")
+    finally:
+        plt.close(fig)
+
+
+def _raise_optuna_pruned(message: str):
+    """Raise Optuna's TrialPruned (fallback to RuntimeError if Optuna missing)."""
+    try:
+        from optuna.exceptions import TrialPruned  # type: ignore
+    except ImportError:
+        class TrialPruned(RuntimeError):  # type: ignore
+            pass
+    raise TrialPruned(message)
+
+
+def launch_training_run(args, run_name_override=None, nested=False,
+                        extra_tags=None, extra_params=None, trial=None):
+    """
+    Launch a single training run, optionally wrapped in an MLflow run.
+    Extracted so Optuna trials can reuse the exact same logging path.
+    """
+    run_name = run_name_override or args.mlflow_run_name
+    if args.disable_mlflow:
+        return run_training(args, trial=trial)
+
+    if args.mlflow_tracking_uri:
+        mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+    mlflow.set_experiment(args.mlflow_experiment_name)
+
+    with mlflow.start_run(run_name=run_name, nested=nested):
+        mlflow.set_tag("model_type", "SatSwinMAE")
+        mlflow.set_tag("framework", "PyTorch")
+        mlflow.set_tag("task", "self-supervised learning")
+        if extra_tags:
+            for key, value in extra_tags.items():
+                mlflow.set_tag(key, value)
+
+        if args.mlflow_tags:
+            for tag in args.mlflow_tags:
+                if "=" in tag:
+                    key, value = tag.split("=", 1)
+                    mlflow.set_tag(key.strip(), value.strip())
+                else:
+                    print(f"Warning: Invalid tag format '{tag}', expected 'key=value'")
+
+        params = {
+            "variables": args.variables,
+            "window_T": args.window_T,
+            "window_H": args.window_H,
+            "window_W": args.window_W,
+            "stride_T": args.stride_T,
+            "stride_H": args.stride_H,
+            "stride_W": args.stride_W,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "mask_ratio": args.mask_ratio,
+            "embed_dim": args.embed_dim,
+            "depths": args.depths,
+            "heads": args.heads,
+            "window_t": args.window_t,
+            "window_h": args.window_h,
+            "window_w": args.window_w,
+            "patch_t": args.patch_t,
+            "patch_h": args.patch_h,
+            "patch_w": args.patch_w,
+            "device": args.device,
+            "val_ratio": args.val_ratio,
+            "split_mode": args.split_mode,
+            "seed": args.seed,
+            "time_start": args.time_start,
+            "time_end": args.time_end,
+            "log_model_every_n_epochs": args.log_model_every_n_epochs,
+            "loader_workers": args.loader_workers,
+            "loader_prefetch_factor": args.loader_prefetch_factor,
+            "loader_pin_memory": args.loader_pin_memory,
+            "loader_persistent_workers": args.loader_persistent_workers,
+            "grad_accum_steps": args.grad_accum_steps,
+            "use_amp": args.use_amp,
+            "cache_train_dir": args.cache_train_dir,
+            "cache_val_dir": args.cache_val_dir,
+            "use_optuna": args.use_optuna,
+            "optuna_trials": args.optuna_trials,
+            "optuna_timeout": args.optuna_timeout,
+            "optuna_study_name": args.optuna_study_name,
+            "optuna_storage": args.optuna_storage,
+            "optuna_direction": args.optuna_direction,
+            "optuna_lr_min": args.optuna_lr_min,
+            "optuna_lr_max": args.optuna_lr_max,
+            "optuna_lr_log": args.optuna_lr_log,
+            "optuna_mask_min": args.optuna_mask_min,
+            "optuna_mask_max": args.optuna_mask_max,
+        }
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
+
+        return run_training(args, trial=trial)
+
+
+def run_optuna_search(args):
+    try:
+        import optuna
+    except ImportError as exc:
+        raise SystemExit(
+            "Optuna is required for --use_optuna. Install it via 'pip install optuna'."
+        ) from exc
+
+    if args.optuna_lr_min <= 0 or args.optuna_lr_max <= 0:
+        raise SystemExit("--optuna_lr_min/--optuna_lr_max must be positive.")
+    if args.optuna_lr_min >= args.optuna_lr_max:
+        raise SystemExit("--optuna_lr_min must be < --optuna_lr_max.")
+    if not (0.0 < args.optuna_mask_min < args.optuna_mask_max <= 1.0):
+        raise SystemExit("Mask ratio bounds must satisfy 0 < min < max <= 1.")
+
+    study_kwargs = {
+        "direction": args.optuna_direction,
+    }
+    if args.optuna_study_name:
+        study_kwargs["study_name"] = args.optuna_study_name
+    if args.optuna_storage:
+        study_kwargs["storage"] = args.optuna_storage
+        study_kwargs["load_if_exists"] = True
+
+    study = optuna.create_study(**study_kwargs)
+    print(f"[optuna] Study '{study.study_name}' started with direction={args.optuna_direction}.")
+
+    def objective(trial):
+        trial_args = copy.deepcopy(args)
+        trial_args.use_optuna = False  # avoid recursive launch
+        lr = trial.suggest_float(
+            "lr",
+            args.optuna_lr_min,
+            args.optuna_lr_max,
+            log=bool(args.optuna_lr_log),
+        )
+        mask_ratio = trial.suggest_float(
+            "mask_ratio",
+            args.optuna_mask_min,
+            args.optuna_mask_max,
+        )
+        trial_args.lr = lr
+        trial_args.mask_ratio = mask_ratio
+        trial_args.out_dir = os.path.join(
+            args.out_dir, f"optuna_trial_{trial.number:03d}"
+        )
+        os.makedirs(trial_args.out_dir, exist_ok=True)
+        run_suffix = f"optuna_trial_{trial.number}"
+        run_name = (
+            f"{args.mlflow_run_name}_{run_suffix}"
+            if args.mlflow_run_name
+            else run_suffix
+        )
+        print(f"[optuna] Trial {trial.number}: lr={lr:.3e}, mask_ratio={mask_ratio:.3f}")
+
+        result = launch_training_run(
+            trial_args,
+            run_name_override=run_name,
+            nested=False,
+            extra_tags={"optuna_trial": trial.number},
+            trial=trial,
+        )
+        best_val = result.get("best_val_loss", float("inf"))
+        trial.set_user_attr("best_epoch", result.get("best_epoch"))
+        return best_val
+
+    study.optimize(
+        objective,
+        n_trials=args.optuna_trials,
+        timeout=args.optuna_timeout,
+    )
+
+    best_trial = study.best_trial
+    print(
+        "[optuna] Best trial "
+        f"{best_trial.number} with value={best_trial.value:.4f}, "
+        f"lr={best_trial.params['lr']:.3e}, "
+        f"mask_ratio={best_trial.params['mask_ratio']:.3f}"
+    )
+
 def main():
     args = parse_args()
 
-    # Initialize MLflow
-    if not args.disable_mlflow:
-        if args.mlflow_tracking_uri:
-            mlflow.set_tracking_uri(args.mlflow_tracking_uri)
-        
-        mlflow.set_experiment(args.mlflow_experiment_name)
-        
-        # Start MLflow run
-        with mlflow.start_run(run_name=args.mlflow_run_name):
-            # Set tags
-            mlflow.set_tag("model_type", "SatSwinMAE")
-            mlflow.set_tag("framework", "PyTorch")
-            mlflow.set_tag("task", "self-supervised learning")
-            
-            # Add custom tags if provided
-            if args.mlflow_tags:
-                for tag in args.mlflow_tags:
-                    if "=" in tag:
-                        key, value = tag.split("=", 1)
-                        mlflow.set_tag(key.strip(), value.strip())
-                    else:
-                        print(f"Warning: Invalid tag format '{tag}', expected 'key=value'")
-            
-            # Log hyperparameters
-            mlflow.log_params({
-                "variables": args.variables,
-                "window_T": args.window_T,
-                "window_H": args.window_H,
-                "window_W": args.window_W,
-                "stride_T": args.stride_T,
-                "stride_H": args.stride_H,
-                "stride_W": args.stride_W,
-                "batch_size": args.batch_size,
-                "epochs": args.epochs,
-                "lr": args.lr,
-                "mask_ratio": args.mask_ratio,
-                "embed_dim": args.embed_dim,
-                "depths": args.depths,
-                "heads": args.heads,
-                "window_t": args.window_t,
-                "window_h": args.window_h,
-                "window_w": args.window_w,
-                "patch_t": args.patch_t,
-                "patch_h": args.patch_h,
-                "patch_w": args.patch_w,
-                "device": args.device,
-                "val_ratio": args.val_ratio,
-                "split_mode": args.split_mode,
-                "seed": args.seed,
-                "time_start": args.time_start,
-                "time_end": args.time_end,
-                "log_model_every_n_epochs": args.log_model_every_n_epochs,
-            })
-            
-            run_training(args)
+    if args.use_optuna:
+        run_optuna_search(args)
     else:
-        run_training(args)
+        launch_training_run(args)
 
 
-def run_training(args):
+def run_training(args, trial=None):
     """Main training logic separated for MLflow integration."""
     # Decide file splits
     if args.train_files and args.val_files:
@@ -321,14 +630,40 @@ def run_training(args):
     window = {"T": args.window_T, "H": args.window_H, "W": args.window_W}
     stride = {"T": args.stride_T, "H": args.stride_H, "W": args.stride_W}
 
-    train_loader = make_loader(
-        train_files, args.variables, window, stride, args.batch_size, True,
-        time_start=args.time_start, time_end=args.time_end
+    loader_opts = dict(
+        num_workers=args.loader_workers,
+        pin_memory=args.loader_pin_memory,
+        prefetch_factor=args.loader_prefetch_factor,
+        persistent_workers=args.loader_persistent_workers if args.loader_workers > 0 else False,
     )
-    val_loader = make_loader(
-        val_files, args.variables, window, stride, args.batch_size, False,
-        time_start=args.time_start, time_end=args.time_end
-    )
+
+    use_cache = args.cache_train_dir or args.cache_val_dir
+    if use_cache:
+        if not (args.cache_train_dir and args.cache_val_dir):
+            raise SystemExit("Please provide both --cache_train_dir and --cache_val_dir when using cached data.")
+        train_loader = make_cached_loader(
+            args.cache_train_dir, args.batch_size, True,
+            **loader_opts
+        )
+        val_loader = make_cached_loader(
+            args.cache_val_dir, args.batch_size, False,
+            **loader_opts
+        )
+        cache_window = getattr(train_loader.dataset, "window", None)
+        if isinstance(cache_window, dict):
+            window = cache_window
+        cache_stride = getattr(train_loader.dataset, "stride", None)
+        if isinstance(cache_stride, dict):
+            stride = cache_stride
+    else:
+        train_loader = make_loader(
+            train_files, args.variables, window, stride, args.batch_size, True,
+            time_start=args.time_start, time_end=args.time_end, **loader_opts
+        )
+        val_loader = make_loader(
+            val_files, args.variables, window, stride, args.batch_size, False,
+            time_start=args.time_start, time_end=args.time_end, **loader_opts
+        )
 
     in_chans = int(train_loader.dataset.C)
     if hasattr(val_loader.dataset, "C"):
@@ -364,6 +699,26 @@ def run_training(args):
         mask_ratio=args.mask_ratio
     ).to(args.device)
 
+    mlflow_input_example = None
+    mlflow_signature = None
+    if not args.disable_mlflow:
+        example_tensor = torch.zeros(
+            1,
+            in_chans,
+            window["T"],
+            window["H"],
+            window["W"],
+            dtype=torch.float32,
+        )
+        mlflow_input_example = example_tensor.numpy()
+        prev_mode = model.training
+        model.eval()
+        with torch.no_grad():
+            example_output = model(example_tensor.to(args.device), compute_loss=False).cpu().numpy()
+        mlflow_signature = infer_signature(mlflow_input_example, example_output)
+        if prev_mode:
+            model.train()
+
     # Log model info
     if not args.disable_mlflow:
         total_params = sum(p.numel() for p in model.parameters())
@@ -374,39 +729,119 @@ def run_training(args):
         })
 
     opt = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    amp_enabled = bool(args.use_amp and ("cuda" in str(args.device).lower()))
+    if args.use_amp and not amp_enabled:
+        print("[train_mae] --use_amp requested but CUDA device not detected; running in full precision.")
+    scaler = GradScaler(enabled=amp_enabled)
 
     # adjusts the learning rate following a cosine curve, decreasing it to a minimum value and then restarting
     sched = CosineAnnealingLR(opt, T_max=args.epochs)
     os.makedirs(args.out_dir, exist_ok=True)
 
+    global_step = 0
+    best_val_loss = float("inf")
+    best_epoch = -1
+    last_train_loss = float("nan")
+    last_val_loss = float("nan")
     for epoch in range(1, args.epochs + 1):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
         train_loss_sum = 0.0
         train_batch_count = 0
-        
-        for batch in pbar:
-            data, valid = unpack_and_move(batch, args.device)
-            loss, _ = model(data, compute_loss=True, valid_mask=valid)
-            pbar.set_postfix(loss=f"{loss.item():.4f}")
+        first_batch_t0 = time.perf_counter()
+        first_batch_logged = False
+        accum_steps = max(1, args.grad_accum_steps)
+        opt.zero_grad()
+        num_batches = len(train_loader)
+        prev_step_end = time.perf_counter()
 
-            opt.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            opt.step()
+        for step, batch in enumerate(pbar, start=1):
+            step_start = time.perf_counter()
+            loader_wait = step_start - prev_step_end
+            if not first_batch_logged:
+                latency = time.perf_counter() - first_batch_t0
+                pbar.write(f"[loader] First batch ready after {latency:.1f}s "
+                           f"(batch_size={args.batch_size}, num_workers={train_loader.num_workers})")
+                first_batch_logged = True
+            data, valid = unpack_and_move(batch, args.device)
+            with autocast(enabled=amp_enabled):
+                loss, _ = model(data, compute_loss=True, valid_mask=valid)
+            loss_value = loss.item()
+            pbar.set_postfix(loss=f"{loss_value:.4f}")
+
+            scaled_loss = loss / accum_steps
+            if amp_enabled:
+                scaler.scale(scaled_loss).backward()
+            else:
+                scaled_loss.backward()
+            if step % accum_steps == 0 or step == num_batches:
+                if amp_enabled:
+                    scaler.unscale_(opt)
+                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                if amp_enabled:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
+                opt.zero_grad()
             
-            train_loss_sum += loss.item()
+            train_loss_sum += loss_value
             train_batch_count += 1
+            global_step += 1
+            step_end = time.perf_counter()
+            compute_time = step_end - step_start
+            step_time = max(step_end - prev_step_end, 1e-9)
+            gpu_active_ratio = compute_time / step_time
+            prev_step_end = step_end
+            if not args.disable_mlflow:
+                mlflow.log_metrics(
+                    {
+                        "train_step_loss": loss_value,
+                        "train_step_lr": opt.param_groups[0]["lr"],
+                        "loader_wait_s": loader_wait,
+                        "compute_s": compute_time,
+                        "gpu_active_ratio": gpu_active_ratio,
+                    },
+                    step=global_step,
+                )
+            if trial is not None:
+                trial.report(loss_value, global_step)
+                if trial.should_prune():
+                    prune_msg = (
+                        f"Optuna pruned at step {global_step} "
+                        f"(train_loss={loss_value:.4f})"
+                    )
+                    print(f"[optuna] {prune_msg}")
+                    if not args.disable_mlflow:
+                        mlflow.log_metrics(
+                            {"optuna_pruned_train_loss": loss_value},
+                            step=global_step,
+                        )
+                        mlflow.set_tag("optuna_pruned_step", global_step)
+                    _raise_optuna_pruned(prune_msg)
 
         # Calculate average training loss
         avg_train_loss = train_loss_sum / train_batch_count if train_batch_count > 0 else float('nan')
 
         model.eval()
         vtotal = 0.0
+        logged_preview = False
         with torch.no_grad():
             for batch in val_loader:
                 data, valid = unpack_and_move(batch, args.device)
-                loss, _ = model(data, compute_loss=True, valid_mask=valid)
+                with autocast(enabled=amp_enabled):
+                    loss, recon = model(data, compute_loss=True, valid_mask=valid)
+                if (not logged_preview) and (not args.disable_mlflow) and data.size(0) > 0:
+                    try:
+                        log_reconstruction_preview_mlflow(
+                            epoch,
+                            data[0],
+                            recon[0],
+                            channel_names=chan_names
+                        )
+                        logged_preview = True
+                    except Exception as exc:
+                        print(f"[mlflow] Failed to prepare reconstruction preview: {exc}")
                 vtotal += loss.item() * data.size(0)
         # print(f"vtotal: {vtotal} , len(val_loader.dataset): {len(val_loader.dataset)}")
         if len(val_loader.dataset) > 0:
@@ -423,6 +858,12 @@ def run_training(args):
                 "learning_rate": sched.get_last_lr()[0],
             }, step=epoch)
             
+        last_train_loss = avg_train_loss
+        last_val_loss = val_loss
+        if np.isfinite(val_loss) and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+
         print(f"Epoch {epoch}/{args.epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
         
         # Save checkpoint
@@ -443,7 +884,9 @@ def run_training(args):
                     mlflow.pytorch.log_model(
                         model, 
                         f"model_epoch_{epoch}",
-                        registered_model_name=f"{args.mlflow_experiment_name}_model" if epoch == args.epochs else None
+                        registered_model_name=f"{args.mlflow_experiment_name}_model" if epoch == args.epochs else None,
+                        signature=mlflow_signature,
+                        input_example=mlflow_input_example,
                     )
                     # Log the checkpoint file
                     mlflow.log_artifact(checkpoint_path, "checkpoints")
@@ -453,6 +896,18 @@ def run_training(args):
             
         sched.step()
 
+    if not args.disable_mlflow:
+        best_metrics = {"best_val_epoch": best_epoch}
+        if np.isfinite(best_val_loss):
+            best_metrics["best_val_loss"] = best_val_loss
+        mlflow.log_metrics(best_metrics)
+
+    return {
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "final_val_loss": last_val_loss,
+        "final_train_loss": last_train_loss,
+    }
 
 if __name__ == "__main__":
     main()
