@@ -42,10 +42,10 @@ export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 WINDOW_T=168
 WINDOW_H=64
 WINDOW_W=64
-STRIDE_T=168
+STRIDE_T=48
 STRIDE_H=32
 STRIDE_W=32
-MASK_RATIO=0.75
+MASK_RATIO=0.60
 WINDOW_t=2
 WINDOW_h=8
 WINDOW_w=8
@@ -55,6 +55,16 @@ PATCH_w=4
 TIME_START="2024-01-01"
 TIME_END="2024-08-31"
 VARIABLES=(u10 v10 r sp ssrd t cp)
+USE_OPTUNA=${USE_OPTUNA:-0}
+OPTUNA_TRIALS=${OPTUNA_TRIALS:-10}
+OPTUNA_TIMEOUT=${OPTUNA_TIMEOUT:-0}
+OPTUNA_LR_MIN=${OPTUNA_LR_MIN:-5e-5}
+OPTUNA_LR_MAX=${OPTUNA_LR_MAX:-1e-2}
+OPTUNA_MASK_MIN=${OPTUNA_MASK_MIN:-0.60}
+OPTUNA_MASK_MAX=${OPTUNA_MASK_MAX:-0.90}
+OPTUNA_LR_LOG=${OPTUNA_LR_LOG:-1}
+OPTUNA_STORAGE=${OPTUNA_STORAGE:-}
+OPTUNA_STUDY_NAME=${OPTUNA_STUDY_NAME:-"sat_swinmae_optuna"}
 
 read -r -a CACHE_TRAIN_PATTERNS <<< "${CACHE_TRAIN_FILES:-}"
 read -r -a CACHE_VAL_PATTERNS <<< "${CACHE_VAL_FILES:-}"
@@ -106,25 +116,50 @@ else
   fi
 fi
 
-"$PYTHON_BIN" -m sat_swin_mae.train_mae \
-  --files "./dataset/raw_data/**/*.nc" \
-  --batch_size 16 --epochs 5 \
-  --grad_accum_steps 3 \
-  --val_ratio 0.3 --split_mode random --seed 123 \
-  --window_T "$WINDOW_T" --window_H "$WINDOW_H" --window_W "$WINDOW_W" \
-  --stride_T "$STRIDE_T" --stride_H "$STRIDE_H" --stride_W "$STRIDE_W" \
-  --mask_ratio "$MASK_RATIO" \
-  --window_t "$WINDOW_t" --window_h "$WINDOW_h" --window_w "$WINDOW_w" \
-  --patch_t "$PATCH_t" --patch_h "$PATCH_h" --patch_w "$PATCH_w" \
-  --variables "${VARIABLES[@]}" \
-  --time_start "$TIME_START" \
-  --time_end   "$TIME_END" \
-  --loader_workers 8 \
-  --loader_prefetch_factor 6 \
-  --loader_persistent_workers \
-  --use_amp \
-  --mlflow_experiment_name "mae_training" \
-  --mlflow_run_name "swinmae_v2.1" \
-  --mlflow_tags dataset=era5_2024 gpu=3090 experiment_type=baseline \
-  --log_model_every_n_epochs 2 \
+TRAIN_CMD=(
+  "$PYTHON_BIN" -m sat_swin_mae.train_mae
+  --files "./dataset/raw_data/**/*.nc"
+  --batch_size 8 --epochs 5
+  --grad_accum_steps 3
+  --val_ratio 0.3 --split_mode random --seed 123
+  --window_T "$WINDOW_T" --window_H "$WINDOW_H" --window_W "$WINDOW_W"
+  --stride_T "$STRIDE_T" --stride_H "$STRIDE_H" --stride_W "$STRIDE_W"
+  --mask_ratio "$MASK_RATIO"
+  --window_t "$WINDOW_t" --window_h "$WINDOW_h" --window_w "$WINDOW_w"
+  --patch_t "$PATCH_t" --patch_h "$PATCH_h" --patch_w "$PATCH_w"
+  --variables "${VARIABLES[@]}"
+  --time_start "$TIME_START"
+  --time_end   "$TIME_END"
+  --loader_workers 8
+  --loader_prefetch_factor 6
+  --loader_persistent_workers
+  --use_amp
+  --mlflow_experiment_name "mae_training"
+  --mlflow_run_name "swinmae_v2.1"
+  --mlflow_tags dataset=era5_2024 gpu=3090 experiment_type=baseline
+  --lr 0.0002
+  --log_model_every_n_epochs 2
   "${CACHE_FLAGS[@]}"
+)
+
+if [[ "$USE_OPTUNA" == 1 ]]; then
+  OPTUNA_ARGS=(
+    --use_optuna
+    --optuna_trials "$OPTUNA_TRIALS"
+    --optuna_lr_min "$OPTUNA_LR_MIN" --optuna_lr_max "$OPTUNA_LR_MAX"
+    --optuna_mask_min "$OPTUNA_MASK_MIN" --optuna_mask_max "$OPTUNA_MASK_MAX"
+    --optuna_study_name "$OPTUNA_STUDY_NAME"
+  )
+  if [[ "$OPTUNA_TIMEOUT" -gt 0 ]]; then
+    OPTUNA_ARGS+=(--optuna_timeout "$OPTUNA_TIMEOUT")
+  fi
+  if [[ "$OPTUNA_LR_LOG" == 1 ]]; then
+    OPTUNA_ARGS+=(--optuna_lr_log)
+  fi
+  if [[ -n "$OPTUNA_STORAGE" ]]; then
+    OPTUNA_ARGS+=(--optuna_storage "$OPTUNA_STORAGE")
+  fi
+  TRAIN_CMD+=("${OPTUNA_ARGS[@]}")
+fi
+
+"${TRAIN_CMD[@]}"

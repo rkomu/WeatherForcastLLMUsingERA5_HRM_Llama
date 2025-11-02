@@ -1,4 +1,5 @@
 # sat_swin_mae/train_mae.py
+import copy
 import os
 import argparse
 import glob
@@ -214,6 +215,28 @@ def parse_args():
                     help="Path to memmap cache (from tools/cache_era5_cubes.py) for training set.")
     ap.add_argument("--cache_val_dir", type=str, default=None,
                     help="Path to memmap cache for validation set.")
+    ap.add_argument("--use_optuna", action="store_true",
+                    help="Enable Optuna hyperparameter tuning for learning rate and mask ratio.")
+    ap.add_argument("--optuna_trials", type=int, default=10,
+                    help="Number of Optuna trials to run when --use_optuna is set.")
+    ap.add_argument("--optuna_timeout", type=int, default=None,
+                    help="Optional timeout (in seconds) for the Optuna study.")
+    ap.add_argument("--optuna_study_name", type=str, default="sat_swinmae_optuna",
+                    help="Name for the Optuna study (used when storage is provided).")
+    ap.add_argument("--optuna_storage", type=str, default=None,
+                    help="Optuna storage URI (e.g., sqlite:///study.db). Enables study persistence.")
+    ap.add_argument("--optuna_direction", type=str, choices=["minimize", "maximize"], default="minimize",
+                    help="Optimization direction for the Optuna study. For loss, keep 'minimize'.")
+    ap.add_argument("--optuna_lr_min", type=float, default=1e-5,
+                    help="Lower bound for learning rate search space.")
+    ap.add_argument("--optuna_lr_max", type=float, default=5e-4,
+                    help="Upper bound for learning rate search space.")
+    ap.add_argument("--optuna_lr_log", action="store_true",
+                    help="Sample learning rates on a log scale when tuning with Optuna.")
+    ap.add_argument("--optuna_mask_min", type=float, default=0.5,
+                    help="Lower bound for mask ratio search space.")
+    ap.add_argument("--optuna_mask_max", type=float, default=0.95,
+                    help="Upper bound for mask ratio search space.")
     
     # MLflow tracking arguments
     ap.add_argument("--mlflow_tracking_uri", type=str, default=None,
@@ -399,77 +422,192 @@ def log_reconstruction_preview_mlflow(epoch, sample_input, sample_recon, channel
     finally:
         plt.close(fig)
 
+
+def _raise_optuna_pruned(message: str):
+    """Raise Optuna's TrialPruned (fallback to RuntimeError if Optuna missing)."""
+    try:
+        from optuna.exceptions import TrialPruned  # type: ignore
+    except ImportError:
+        class TrialPruned(RuntimeError):  # type: ignore
+            pass
+    raise TrialPruned(message)
+
+
+def launch_training_run(args, run_name_override=None, nested=False,
+                        extra_tags=None, extra_params=None, trial=None):
+    """
+    Launch a single training run, optionally wrapped in an MLflow run.
+    Extracted so Optuna trials can reuse the exact same logging path.
+    """
+    run_name = run_name_override or args.mlflow_run_name
+    if args.disable_mlflow:
+        return run_training(args, trial=trial)
+
+    if args.mlflow_tracking_uri:
+        mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+    mlflow.set_experiment(args.mlflow_experiment_name)
+
+    with mlflow.start_run(run_name=run_name, nested=nested):
+        mlflow.set_tag("model_type", "SatSwinMAE")
+        mlflow.set_tag("framework", "PyTorch")
+        mlflow.set_tag("task", "self-supervised learning")
+        if extra_tags:
+            for key, value in extra_tags.items():
+                mlflow.set_tag(key, value)
+
+        if args.mlflow_tags:
+            for tag in args.mlflow_tags:
+                if "=" in tag:
+                    key, value = tag.split("=", 1)
+                    mlflow.set_tag(key.strip(), value.strip())
+                else:
+                    print(f"Warning: Invalid tag format '{tag}', expected 'key=value'")
+
+        params = {
+            "variables": args.variables,
+            "window_T": args.window_T,
+            "window_H": args.window_H,
+            "window_W": args.window_W,
+            "stride_T": args.stride_T,
+            "stride_H": args.stride_H,
+            "stride_W": args.stride_W,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "mask_ratio": args.mask_ratio,
+            "embed_dim": args.embed_dim,
+            "depths": args.depths,
+            "heads": args.heads,
+            "window_t": args.window_t,
+            "window_h": args.window_h,
+            "window_w": args.window_w,
+            "patch_t": args.patch_t,
+            "patch_h": args.patch_h,
+            "patch_w": args.patch_w,
+            "device": args.device,
+            "val_ratio": args.val_ratio,
+            "split_mode": args.split_mode,
+            "seed": args.seed,
+            "time_start": args.time_start,
+            "time_end": args.time_end,
+            "log_model_every_n_epochs": args.log_model_every_n_epochs,
+            "loader_workers": args.loader_workers,
+            "loader_prefetch_factor": args.loader_prefetch_factor,
+            "loader_pin_memory": args.loader_pin_memory,
+            "loader_persistent_workers": args.loader_persistent_workers,
+            "grad_accum_steps": args.grad_accum_steps,
+            "use_amp": args.use_amp,
+            "cache_train_dir": args.cache_train_dir,
+            "cache_val_dir": args.cache_val_dir,
+            "use_optuna": args.use_optuna,
+            "optuna_trials": args.optuna_trials,
+            "optuna_timeout": args.optuna_timeout,
+            "optuna_study_name": args.optuna_study_name,
+            "optuna_storage": args.optuna_storage,
+            "optuna_direction": args.optuna_direction,
+            "optuna_lr_min": args.optuna_lr_min,
+            "optuna_lr_max": args.optuna_lr_max,
+            "optuna_lr_log": args.optuna_lr_log,
+            "optuna_mask_min": args.optuna_mask_min,
+            "optuna_mask_max": args.optuna_mask_max,
+        }
+        if extra_params:
+            params.update(extra_params)
+        mlflow.log_params(params)
+
+        return run_training(args, trial=trial)
+
+
+def run_optuna_search(args):
+    try:
+        import optuna
+    except ImportError as exc:
+        raise SystemExit(
+            "Optuna is required for --use_optuna. Install it via 'pip install optuna'."
+        ) from exc
+
+    if args.optuna_lr_min <= 0 or args.optuna_lr_max <= 0:
+        raise SystemExit("--optuna_lr_min/--optuna_lr_max must be positive.")
+    if args.optuna_lr_min >= args.optuna_lr_max:
+        raise SystemExit("--optuna_lr_min must be < --optuna_lr_max.")
+    if not (0.0 < args.optuna_mask_min < args.optuna_mask_max <= 1.0):
+        raise SystemExit("Mask ratio bounds must satisfy 0 < min < max <= 1.")
+
+    study_kwargs = {
+        "direction": args.optuna_direction,
+    }
+    if args.optuna_study_name:
+        study_kwargs["study_name"] = args.optuna_study_name
+    if args.optuna_storage:
+        study_kwargs["storage"] = args.optuna_storage
+        study_kwargs["load_if_exists"] = True
+
+    study = optuna.create_study(**study_kwargs)
+    print(f"[optuna] Study '{study.study_name}' started with direction={args.optuna_direction}.")
+
+    def objective(trial):
+        trial_args = copy.deepcopy(args)
+        trial_args.use_optuna = False  # avoid recursive launch
+        lr = trial.suggest_float(
+            "lr",
+            args.optuna_lr_min,
+            args.optuna_lr_max,
+            log=bool(args.optuna_lr_log),
+        )
+        mask_ratio = trial.suggest_float(
+            "mask_ratio",
+            args.optuna_mask_min,
+            args.optuna_mask_max,
+        )
+        trial_args.lr = lr
+        trial_args.mask_ratio = mask_ratio
+        trial_args.out_dir = os.path.join(
+            args.out_dir, f"optuna_trial_{trial.number:03d}"
+        )
+        os.makedirs(trial_args.out_dir, exist_ok=True)
+        run_suffix = f"optuna_trial_{trial.number}"
+        run_name = (
+            f"{args.mlflow_run_name}_{run_suffix}"
+            if args.mlflow_run_name
+            else run_suffix
+        )
+        print(f"[optuna] Trial {trial.number}: lr={lr:.3e}, mask_ratio={mask_ratio:.3f}")
+
+        result = launch_training_run(
+            trial_args,
+            run_name_override=run_name,
+            nested=False,
+            extra_tags={"optuna_trial": trial.number},
+            trial=trial,
+        )
+        best_val = result.get("best_val_loss", float("inf"))
+        trial.set_user_attr("best_epoch", result.get("best_epoch"))
+        return best_val
+
+    study.optimize(
+        objective,
+        n_trials=args.optuna_trials,
+        timeout=args.optuna_timeout,
+    )
+
+    best_trial = study.best_trial
+    print(
+        "[optuna] Best trial "
+        f"{best_trial.number} with value={best_trial.value:.4f}, "
+        f"lr={best_trial.params['lr']:.3e}, "
+        f"mask_ratio={best_trial.params['mask_ratio']:.3f}"
+    )
+
 def main():
     args = parse_args()
 
-    # Initialize MLflow
-    if not args.disable_mlflow:
-        if args.mlflow_tracking_uri:
-            mlflow.set_tracking_uri(args.mlflow_tracking_uri)
-        
-        mlflow.set_experiment(args.mlflow_experiment_name)
-        
-        # Start MLflow run
-        with mlflow.start_run(run_name=args.mlflow_run_name):
-            # Set tags
-            mlflow.set_tag("model_type", "SatSwinMAE")
-            mlflow.set_tag("framework", "PyTorch")
-            mlflow.set_tag("task", "self-supervised learning")
-            
-            # Add custom tags if provided
-            if args.mlflow_tags:
-                for tag in args.mlflow_tags:
-                    if "=" in tag:
-                        key, value = tag.split("=", 1)
-                        mlflow.set_tag(key.strip(), value.strip())
-                    else:
-                        print(f"Warning: Invalid tag format '{tag}', expected 'key=value'")
-            
-            # Log hyperparameters
-            mlflow.log_params({
-                "variables": args.variables,
-                "window_T": args.window_T,
-                "window_H": args.window_H,
-                "window_W": args.window_W,
-                "stride_T": args.stride_T,
-                "stride_H": args.stride_H,
-                "stride_W": args.stride_W,
-                "batch_size": args.batch_size,
-                "epochs": args.epochs,
-                "lr": args.lr,
-                "mask_ratio": args.mask_ratio,
-                "embed_dim": args.embed_dim,
-                "depths": args.depths,
-                "heads": args.heads,
-                "window_t": args.window_t,
-                "window_h": args.window_h,
-                "window_w": args.window_w,
-                "patch_t": args.patch_t,
-                "patch_h": args.patch_h,
-                "patch_w": args.patch_w,
-                "device": args.device,
-                "val_ratio": args.val_ratio,
-                "split_mode": args.split_mode,
-                "seed": args.seed,
-                "time_start": args.time_start,
-                "time_end": args.time_end,
-                "log_model_every_n_epochs": args.log_model_every_n_epochs,
-                "loader_workers": args.loader_workers,
-                "loader_prefetch_factor": args.loader_prefetch_factor,
-                "loader_pin_memory": args.loader_pin_memory,
-                "loader_persistent_workers": args.loader_persistent_workers,
-                "grad_accum_steps": args.grad_accum_steps,
-                "use_amp": args.use_amp,
-                "cache_train_dir": args.cache_train_dir,
-                "cache_val_dir": args.cache_val_dir,
-            })
-            
-            run_training(args)
+    if args.use_optuna:
+        run_optuna_search(args)
     else:
-        run_training(args)
+        launch_training_run(args)
 
 
-def run_training(args):
+def run_training(args, trial=None):
     """Main training logic separated for MLflow integration."""
     # Decide file splits
     if args.train_files and args.val_files:
@@ -601,6 +739,10 @@ def run_training(args):
     os.makedirs(args.out_dir, exist_ok=True)
 
     global_step = 0
+    best_val_loss = float("inf")
+    best_epoch = -1
+    last_train_loss = float("nan")
+    last_val_loss = float("nan")
     for epoch in range(1, args.epochs + 1):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.epochs}")
@@ -662,6 +804,21 @@ def run_training(args):
                     },
                     step=global_step,
                 )
+            if trial is not None:
+                trial.report(loss_value, global_step)
+                if trial.should_prune():
+                    prune_msg = (
+                        f"Optuna pruned at step {global_step} "
+                        f"(train_loss={loss_value:.4f})"
+                    )
+                    print(f"[optuna] {prune_msg}")
+                    if not args.disable_mlflow:
+                        mlflow.log_metrics(
+                            {"optuna_pruned_train_loss": loss_value},
+                            step=global_step,
+                        )
+                        mlflow.set_tag("optuna_pruned_step", global_step)
+                    _raise_optuna_pruned(prune_msg)
 
         # Calculate average training loss
         avg_train_loss = train_loss_sum / train_batch_count if train_batch_count > 0 else float('nan')
@@ -701,6 +858,12 @@ def run_training(args):
                 "learning_rate": sched.get_last_lr()[0],
             }, step=epoch)
             
+        last_train_loss = avg_train_loss
+        last_val_loss = val_loss
+        if np.isfinite(val_loss) and val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+
         print(f"Epoch {epoch}/{args.epochs} - Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss:.4f}")
         
         # Save checkpoint
@@ -733,6 +896,18 @@ def run_training(args):
             
         sched.step()
 
+    if not args.disable_mlflow:
+        best_metrics = {"best_val_epoch": best_epoch}
+        if np.isfinite(best_val_loss):
+            best_metrics["best_val_loss"] = best_val_loss
+        mlflow.log_metrics(best_metrics)
+
+    return {
+        "best_val_loss": best_val_loss,
+        "best_epoch": best_epoch,
+        "final_val_loss": last_val_loss,
+        "final_train_loss": last_train_loss,
+    }
 
 if __name__ == "__main__":
     main()
